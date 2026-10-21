@@ -269,6 +269,19 @@ function dailies.on_text(e)
         if npc == 'Murdox' and prev and prev.remaining then
             data.remaining = prev.remaining
         end
+        -- "Congratulations! You've completed my quest..." replaces the task
+        -- line. Keep the zone and item, and show the row as finished.
+        if type(data.message) == 'string' and data.message:lower():find('congratulat', 1, true) then
+            data.status = 'complete'
+            if prev then
+                data.zone = data.zone or prev.zone
+                data.item = data.item or prev.item
+                data.target = data.target or prev.target
+                data.count = data.count or prev.count
+                data.hint = data.hint or prev.hint
+                data.remaining = data.remaining or prev.remaining
+            end
+        end
         cfg.dailies[npc] = data
         save()
         return
@@ -287,12 +300,25 @@ function dailies.on_text(e)
     end
 end
 
+-- A stored congratulations line is the same finish as "quest complete",
+-- including rows saved before that line set a status.
+function dailies.is_complete(row)
+    if type(row) ~= 'table' then
+        return false
+    end
+    if row.status == 'complete' then
+        return true
+    end
+    local message = row.message
+    return type(message) == 'string' and message:lower():find('congratulat', 1, true) ~= nil
+end
+
 -- Chat summary. Same words the Goldilox command printed.
 local function goblin_status(npc, row)
     if row == nil then
         return nil
     end
-    if row.status == 'complete' then
+    if dailies.is_complete(row) then
         return 'Complete!'
     end
     if row.status == 'return' then
@@ -354,7 +380,7 @@ function dailies.report()
         local preamble = chat.header(addon.name) .. npc .. ': '
         if row == nil then
             print(preamble .. chat.color1(68, 'Not talked to today.'))
-        elseif row.status == 'complete' then
+        elseif dailies.is_complete(row) then
             print(preamble .. chat.color1(72, 'Complete!'))
             completed = completed + 1
         elseif row.status == 'return' then

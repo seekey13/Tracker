@@ -188,12 +188,11 @@ local function help()
     printf('Tracker commands:')
     printf('  /tracker             Show this help')
     printf('  /tracker ui          Show or hide the window')
-    printf('  /tracker opacity N   Background opacity, 0 to 100')
     printf('  /tracker dailies     Print goblin and Palalumin status')
     printf('  /tracker clear       Clear the AMAN regime')
     printf('  /tracker debug       Toggle death-packet logging')
     printf('  /tracker test <name> Test an enemy name against the regime')
-    printf('Hold Shift to drag. The cog sets background opacity. The x closes the window.')
+    printf('Hold Shift to drag. The frame fades until the mouse is over the window. The x closes it.')
     printf('/at, /goldilox and /dailies still work.')
 end
 
@@ -217,14 +216,6 @@ local function on_command(args)
     elseif sub == 'ui' then
         ui.toggle()
         printf('UI %s', ui.visible() and 'opened' or 'closed')
-    elseif sub == 'opacity' then
-        if args[3] == nil or args[3] == '' then
-            printf('Background opacity is %d.', ui.opacity())
-        elseif ui.set_opacity(args[3]) then
-            printf('Background opacity set to %d.', ui.opacity())
-        else
-            printf('Usage: /tracker opacity <0-100>')
-        end
     elseif sub == 'clear' then
         regime.clear()
         printf('Training data cleared and saved.')

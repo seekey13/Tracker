@@ -174,6 +174,8 @@ local chat = {
 }
 
 local buttons, texts, drawn = {}, {}, {}
+local style_colors, dummies, rects = {}, {}, {}
+local title_alpha = nil
 local began = 0
 local slider_mode = 'idle'
 local slider_id = nil
@@ -181,12 +183,17 @@ local slider_id = nil
 local draw_list = {
     AddLine = function() end,
     AddRect = function() end,
-    AddRectFilled = function() end,
+    AddRectFilled = function(_, _, _, col)
+        rects[#rects + 1] = col
+    end,
     AddTriangleFilled = function() end,
     ChannelsSplit = function() end,
     ChannelsSetCurrent = function() end,
     ChannelsMerge = function() end,
-    AddText = function(_, _, _, str)
+    AddText = function(_, _, col, str)
+        if str == 'Tracker' and type(col) == 'number' then
+            title_alpha = math.floor(col / 16777216)
+        end
         if type(str) == 'string' and #str > 1 then
             drawn[#drawn + 1] = str
         end
@@ -207,7 +214,9 @@ local imgui = {
         return 40, 50
     end,
     SetCursorScreenPos = function() end,
-    Dummy = function() end,
+    Dummy = function(size)
+        dummies[#dummies + 1] = size
+    end,
     SameLine = function() end,
     BeginGroup = function() end,
     EndGroup = function() end,
@@ -225,6 +234,9 @@ local imgui = {
     IsItemClicked = function()
         return false
     end,
+    IsWindowHovered = function()
+        return world.hover and true or false
+    end,
     GetItemRectMin = function()
         return 40, 50
     end,
@@ -237,7 +249,9 @@ local imgui = {
     GetBackgroundDrawList = function()
         return draw_list
     end,
-    PushStyleColor = function() end,
+    PushStyleColor = function(_, color)
+        style_colors[#style_colors + 1] = color
+    end,
     PopStyleColor = function() end,
     PushStyleVar = function() end,
     PopStyleVar = function() end,
@@ -625,8 +639,9 @@ eq(addon.version, '1.0', 'addon version')
 eq(addon.desc, 'Keeps track of dailies and AMAN targets.  Exclusively for CatsEye XI.', 'addon desc')
 eq(addon.link, 'https://github.com/seekey13/Tracker', 'addon link')
 eq(dailies.settings().migrated, false, 'defaults profile is not migrated')
-eq(ui.opacity(), 100, 'default opacity')
 eq(ui.show[1], true, 'window starts open')
+eq(ui.opacity, nil, 'opacity slider is gone')
+eq(ui.opacity_open, nil, 'opacity gear is gone')
 
 local cfg = dailies.settings()
 
@@ -652,6 +667,11 @@ text_in('Murdox : Go to East Sarutabaruta and kill 20 Crawlers!', 9)
 text_in('Mistrix : Craft me up a signed oak cudgel and trade it to me!', 9)
 text_in('Saltlix : Go to West Sarutabaruta and kill Numbing Norman!', 9)
 text_in('Beetrix : Go to Gusgen Mines, get a Gusgen Clay and trade it to me!', 9)
+text_in("Beetrix : Congratulations! You've completed my quest for today, here's your reward!", 9)
+eq(cfg.dailies.Beetrix.status, 'complete', 'congratulations marks the daily complete')
+eq(cfg.dailies.Beetrix.zone, 'Gusgen Mines', 'congratulations keeps the zone')
+eq(cfg.dailies.Beetrix.item, 'Gusgen Clay', 'congratulations keeps the item')
+eq(dailies.is_complete({ message = 'Congratulations! Here is your reward!' }), true, 'stored congratulations counts as complete')
 eq(cfg.dailies.Fishstix.zone, 'Zeruhn Mines', 'talk stores fishstix')
 eq(cfg.dailies.Mistrix.item, 'oak cudgel', 'talk stores mistrix')
 
@@ -788,17 +808,9 @@ local usage = command({ '/at', 'test' })
 eq(usage.blocked, true, '/at is blocked')
 truthy(printed('Usage: /tracker test'), 'test usage')
 
-local opacity = command({ '/tracker', 'opacity', '0' })
-eq(opacity.blocked, true, 'opacity command blocked')
-eq(ui.opacity(), 0, 'opacity can be zero')
-command({ '/tracker', 'opacity', 'nope' })
-eq(ui.opacity(), 0, 'bad opacity is ignored')
-truthy(printed('Usage: /tracker opacity'), 'opacity usage')
-command({ '/tracker', 'opacity', '40' })
-eq(ui.opacity(), 40, 'opacity 40')
 command({ '/tracker' })
 truthy(printed('Hold Shift to drag'), 'help mentions shift')
-truthy(printed('cog'), 'help mentions the cog')
+truthy(printed('fades until the mouse'), 'help mentions the hover fade')
 
 lines = {}
 local echoed = command({ '/echo', 'hi' })
@@ -835,6 +847,8 @@ vana = {
 
 local function render()
     buttons, texts, drawn = {}, {}, {}
+    style_colors, dummies, rects = {}, {}, {}
+    title_alpha = nil
     slider_id = nil
     local ok, err = xpcall(ui.render, debug.traceback)
     if not ok then
@@ -842,40 +856,57 @@ local function render()
     end
 end
 
+local function scaled(n)
+    local s = math.max(0.75, math.min(1.6, 1440 / 1440)) * 1.1
+    return math.floor(n * s + 0.5)
+end
+
+local function count_gaps()
+    local gap = scaled(12)
+    local n = 0
+    for _, size in ipairs(dummies) do
+        if size[1] == 0 and size[2] == gap then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+local function has_solid_fill()
+    for _, col in ipairs(rects) do
+        if type(col) == 'number' and math.floor(col / 16777216) == 255 then
+            return true
+        end
+    end
+    return false
+end
+
 world.level = 0
-ui.opacity_open = true
 ui.show[1] = true
 began = 0
 render()
 eq(began, 0, 'loading skips the window')
-
-world.level = 75
-cfg.dailies = {}
-cfg.palalumin_quests = {}
-cfg.palalumin_flagged = false
-regime.clear()
-slider_mode = 'set25'
-began = 0
-render()
-eq(began, 1, 'opacity row keeps an empty window open')
-eq(slider_id, '##tracker.opacity', 'slider id')
-eq(ui.opacity(), 25, 'slider writes opacity')
-eq(button_at('##fold.Goblin Dailies'), nil, 'empty window has no goblin header')
 eq(#layout_calls, 1, 'layout registers once')
 eq(layout_calls[1][1], 'Tracker', 'layout window')
 eq(layout_calls[1][2], 12, 'layout x from imgui.ini')
 eq(layout_calls[1][3], 34, 'layout y from imgui.ini')
 eq(layout_calls[1][4], 1, 'layout scale stays 1')
 
-ui.set_opacity(100)
-slider_mode = 'idle'
-ui.opacity_open = true
+world.level = 75
+cfg.dailies = {}
+cfg.palalumin_quests = {}
+cfg.palalumin_flagged = false
+regime.clear()
+began = 0
+render()
+eq(began, 0, 'an empty day draws nothing')
+
 cfg.dailies = {
     Fishstix = { zone = 'Zeruhn Mines', hint = 'Far North' },
     Murdox = { count = '20', remaining = '16', target = 'Crawlers', zone = 'East Sarutabaruta' },
     Mistrix = { item = 'oak cudgel' },
     Saltlix = { target = 'Numbing Norman', zone = 'West Sarutabaruta', status = 'return' },
-    Beetrix = { status = 'complete' },
+    Beetrix = { message = "Congratulations! You've completed my quest for today, here's your reward!" },
 }
 cfg.goldilox_time = nil
 cfg.palalumin_flagged = true
@@ -897,23 +928,43 @@ render()
 local goblin_i = button_at('##fold.Goblin Dailies')
 local pala_i = button_at('##fold.Palalumin Quests')
 local aman_i = button_at('##fold.AMAN Targets')
-local cog_i = button_at('##tracker.cog')
 local close_i = button_at('##tracker.close')
-truthy(cog_i and close_i and cog_i < close_i, 'cog is left of the close mark')
+eq(button_at('##tracker.cog'), nil, 'the gear is gone')
+truthy(close_i ~= nil, 'close mark is still there')
 truthy(goblin_i and pala_i and aman_i and goblin_i < pala_i and pala_i < aman_i, 'section order')
+truthy(has_text('Beetrix: Complete!'), 'congratulations row reads as complete')
 truthy(has_text('Training in'), 'regime line')
 truthy(has_text('Lv 48~49'), 'level line')
 truthy(has_drawn('Goldilox: Reward not collected.'), 'reward notice')
 truthy(has_drawn('Tracker'), 'title')
-truthy(has_text('Opacity'), 'slider label')
 eq(#layout_calls, 1, 'layout is not registered again')
+eq(count_gaps(), 2, 'a gap sits between each section')
+eq(style_colors[3][4], 0, 'the frame starts clear')
+eq(title_alpha, 0, 'the title starts clear')
+truthy(has_solid_fill(), 'section wells stay solid while the frame is clear')
 
+local clock = os.clock() + 5
+os.clock = function()
+    return clock
+end
 ui.shift_held = true
+world.hover = true
 render()
+eq(style_colors[3][4], 0, 'the fade waits one frame')
+clock = clock + 1
+render()
+eq(style_colors[3][4], 1, 'hover brings the frame back')
+eq(title_alpha, 255, 'hover brings the title back')
 ui.shift_held = false
-ui.set_opacity(0)
+world.hover = false
+clock = clock + 1
 render()
-eq(ui.opacity(), 0, 'render at zero opacity')
+eq(style_colors[3][4], 1, 'the fade-out waits one frame')
+clock = clock + 1
+render()
+eq(style_colors[3][4], 0, 'leaving the window fades the frame')
+eq(title_alpha, 0, 'leaving the window fades the title')
+truthy(has_solid_fill(), 'section wells stay solid after the fade')
 
 cfg.opacity = 40
 cfg.deadline = 0
@@ -940,7 +991,6 @@ eq(#regime.view().enemies, 0, 'clear drops enemies')
 truthy(printed('Training data cleared'), 'clear notice')
 
 ui.show[1] = true
-ui.opacity_open = false
 cfg.palalumin_flagged = false
 began = 0
 render()

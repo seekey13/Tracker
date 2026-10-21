@@ -14,15 +14,14 @@ The first time a character logs in, Tracker copies that character's `Goldilox-UI
 
 ## Window
 
-The panel lists Goblin Dailies, then Palalumin Quests, then AMAN Targets. A section hides once that work is finished. Hold Shift to drag. The cog beside the close mark opens a 0–100 background opacity slider. Text, links, and the teal meters stay solid when the background fades. The x closes the window until the next AMAN confirm, a restored hunt, or `/tracker ui`.
+The panel lists Goblin Dailies, then Palalumin Quests, then AMAN Targets. A section hides once that work is finished. Each section sits apart from the next, so its rows stay with that header. Hold Shift to drag. The title, the close mark, the frame, and the gaps between sections fade out until the mouse is over the window, then the whole window comes back. The x closes the window until the next AMAN confirm, a restored hunt, or `/tracker ui`.
 
-Opacity is remembered. Closing the window is not.
+Closing the window is not remembered.
 
 ## Commands
 
 - `/tracker` shows this help
 - `/tracker ui` shows or hides the window
-- `/tracker opacity N` sets background opacity from 0 to 100
 - `/tracker dailies` prints goblin and Palalumin status
 - `/tracker clear` clears the AMAN regime only
 - `/tracker debug` toggles death-packet logging
@@ -30,4 +29,6 @@ Opacity is remembered. Closing the window is not.
 - `/at` accepts the same AMAN subcommands
 - `/goldilox` and `/dailies` print status. Add `ui` to toggle the window
 
-The day rolls at Japanese midnight. That clears the dailies and leaves the AMAN regime and the opacity alone.
+The day rolls at Japanese midnight. That clears the dailies and leaves the AMAN regime alone.
+
+A goblin who says "Congratulations!" has finished that daily. The row shows Complete and keeps the zone or item from the earlier talk.

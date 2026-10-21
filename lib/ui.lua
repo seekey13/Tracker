@@ -3,12 +3,11 @@ Tracker - one Vanacore panel.
 
 The drawing is the Goldilox window: /vana colours, Segoe UI, folding
 small-cap headers, and one well per row. A teal meter is kill or item
-progress. Hold Shift to drag. The cog beside the close mark sets how
-solid the background is.
+progress. Hold Shift to drag. The title, close mark, frame, and the
+gaps between sections fade out until the mouse is over the window.
 ]]
 
 local imgui = require('imgui')
-local settingslib = require('settings')
 local dailies = require('lib.dailies')
 local regime = require('lib.regime')
 local family = require('lib.family')
@@ -17,7 +16,6 @@ local parse = require('lib.daily_parse')
 local ui = {}
 ui.show = { true }
 ui.shift_held = false
-ui.opacity_open = false
 
 local HEX = {
     bg = '#161822', border = '#2A2E3E', line = '#242838', well = '#0E1017',
@@ -238,9 +236,9 @@ local function face(which)
     return fonts[which] or imgui.GetFont()
 end
 
-local function glyph(dl, kind, cx, cy, hex, glyph_scale)
+local function glyph(dl, kind, cx, cy, hex, glyph_scale, alpha)
     local k = S(11) / 24 * (glyph_scale or 1)
-    local col = u32(hex)
+    local col = u32(hex, alpha)
     local thickness = math.max(1, 2 * k)
     local function p(px, py)
         return { cx + (px - 12) * k, cy + (py - 12) * k }
@@ -257,41 +255,15 @@ local function glyph(dl, kind, cx, cy, hex, glyph_scale)
     end
 end
 
--- Material Design cog (mdi-cog): eight teeth, a round body, an open centre.
--- The hole is unpainted so a clear window background shows through it.
-local function glyph_cog(dl, cx, cy, hex, glyph_scale)
-    local k = S(11) / 24 * (glyph_scale or 1)
-    local col = u32(hex)
-    for i = 0, 7 do
-        local a = i * math.pi / 4
-        local dx, dy = math.sin(a), -math.cos(a)
-        local function q(r, w)
-            return { cx + (dx * r - dy * w) * k, cy + (dy * r + dx * w) * k }
-        end
-        local b1, b2 = q(5.2, -1.7), q(5.2, 1.7)
-        local t1, t2 = q(8.0, -1.35), q(8.0, 1.35)
-        dl:AddTriangleFilled(b1, b2, t2, col)
-        dl:AddTriangleFilled(b1, t2, t1, col)
-    end
-    local segments = 18
-    for i = 0, segments - 1 do
-        local a0 = (i / segments) * math.pi * 2
-        local a1 = ((i + 1) / segments) * math.pi * 2
-        local function pt(a, r)
-            return { cx + math.cos(a) * r * k, cy + math.sin(a) * r * k }
-        end
-        dl:AddTriangleFilled(pt(a0, 6.1), pt(a1, 6.1), pt(a1, 2.5), col)
-        dl:AddTriangleFilled(pt(a0, 6.1), pt(a1, 2.5), pt(a0, 2.5), col)
-    end
-end
-
 local folded = {}
-local panel = { alpha = 1 }
+-- chrome fades the frame, the title, and the gaps. Section groups stay solid.
+local panel = { chrome = 0, hover = false }
 
 local CHROME_PAD_X = 8
 local BAR_PAD_X = 4
 local ROW_PAD_X = 6
 local ZONE_GAP = 8
+local SECTION_GAP = 12
 
 local function indent_chrome()
     local x, y = imgui.GetCursorScreenPos()
@@ -356,7 +328,7 @@ local function draw_section_header(text)
     local line_x = x + S(14) + title_w + S(8)
     local line_end = x + math.max(btn_w, (panel.fit_w or 0) - pad)
     if line_end > line_x + S(4) then
-        dl:AddLine({ line_x, cy }, { line_end, cy }, u32(HEX.teal, 0.85 * panel.alpha), 1)
+        dl:AddLine({ line_x, cy }, { line_end, cy }, u32(HEX.teal, 0.85), 1)
     end
     mark_width(pad + btn_w)
     return open
@@ -443,8 +415,8 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
 
     local function paint_back()
         local radius = S(3)
-        fill(dl, x1, y1, well_w, row_h, HEX.well, radius, panel.alpha)
-        outline(dl, x1, y1, well_w, row_h, HEX.line, radius, panel.alpha)
+        fill(dl, x1, y1, well_w, row_h, HEX.well, radius, 1)
+        outline(dl, x1, y1, well_w, row_h, HEX.line, radius, 1)
         if not has_meter or well_w <= S(8) then
             return
         end
@@ -452,7 +424,7 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
         local mx = x1 + S(4)
         local mw = flush and (well_w - (mx - x1)) or (well_w - S(8))
         local my = y2 - S(2) - mh
-        fill(dl, mx, my, mw, mh, HEX.off, mh / 2, panel.alpha)
+        fill(dl, mx, my, mw, mh, HEX.off, mh / 2, 1)
         local frac = math.max(0, math.min(1, fraction or 0))
         if frac <= 0 then
             return
@@ -471,7 +443,7 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
     elseif has_meter then
         local mh = math.max(2, S(3))
         local my = y2 - S(2) - mh
-        fill(dl, x1, my, well_w, mh, HEX.off, mh / 2, panel.alpha)
+        fill(dl, x1, my, well_w, mh, HEX.off, mh / 2, 1)
     end
     if add_spacing ~= false then
         imgui.Dummy({ 0, S(1) })
@@ -491,7 +463,7 @@ local function draw_notice(text, hex)
     imgui.Dummy({ w, h })
     mark_width(pad + w)
     local dl = imgui.GetWindowDrawList()
-    fill(dl, x, y, w, h, hex, S(3), 0.12 * panel.alpha)
+    fill(dl, x, y, w, h, hex, S(3), 0.12)
     local left = ImDrawFlags_RoundCornersLeft or ImDrawCornerFlags_Left
     fill(dl, x, y, S(2), h, hex, S(2), 1, left)
     text_mid(dl, x + S(6), y + h / 2, text, hex, face('text'), SMALL + 1)
@@ -503,20 +475,15 @@ local function push_window_style()
     local colors = {
         { ImGuiCol_Text, rgba(HEX.text) },
         { ImGuiCol_TextDisabled, rgba(HEX.faint) },
-        { ImGuiCol_WindowBg, rgba(HEX.bg, panel.alpha) },
-        { ImGuiCol_ChildBg, rgba(HEX.bg, panel.alpha) },
+        { ImGuiCol_WindowBg, rgba(HEX.bg, panel.chrome) },
+        { ImGuiCol_ChildBg, rgba(HEX.bg, panel.chrome) },
         { ImGuiCol_PopupBg, rgba(HEX.popup, 0.97) },
-        { ImGuiCol_Border, rgba(HEX.border, panel.alpha) },
-        { ImGuiCol_Separator, rgba(HEX.line, panel.alpha) },
+        { ImGuiCol_Border, rgba(HEX.border, panel.chrome) },
+        { ImGuiCol_Separator, rgba(HEX.line, panel.chrome) },
         { ImGuiCol_ScrollbarBg, rgba(HEX.bg, 0) },
         { ImGuiCol_ScrollbarGrab, rgba('#3A4158') },
         { ImGuiCol_ScrollbarGrabHovered, rgba('#4A5270') },
         { ImGuiCol_ScrollbarGrabActive, rgba(HEX.accent_lo) },
-        { ImGuiCol_FrameBg, rgba(HEX.well) },
-        { ImGuiCol_FrameBgHovered, rgba(HEX.hover) },
-        { ImGuiCol_FrameBgActive, rgba(HEX.hover) },
-        { ImGuiCol_SliderGrab, rgba(HEX.teal) },
-        { ImGuiCol_SliderGrabActive, rgba(HEX.accent2) },
     }
     for _, entry in ipairs(colors) do
         imgui.PushStyleColor(entry[1], entry[2])
@@ -538,63 +505,6 @@ local function pop_window_style()
     imgui.PopStyleColor(style_count)
 end
 
-local function opacity_number()
-    local saved = dailies.settings()
-    local n = saved and tonumber(saved.opacity) or 100
-    if not n then
-        n = 100
-    end
-    if n < 0 then
-        n = 0
-    elseif n > 100 then
-        n = 100
-    end
-    return math.floor(n + 0.5)
-end
-
-function ui.opacity()
-    return opacity_number()
-end
-
-function ui.set_opacity(n)
-    local saved = dailies.settings()
-    if not saved then
-        return false
-    end
-    n = tonumber(n)
-    if n == nil then
-        return false
-    end
-    n = math.max(0, math.min(100, math.floor(n + 0.5)))
-    saved.opacity = n
-    settingslib.save()
-    return true
-end
-
-local function draw_opacity_slider()
-    local pad = indent_chrome()
-    imgui.BeginGroup()
-    imgui.AlignTextToFramePadding()
-    imgui.TextColored(rgba(HEX.text2), 'Opacity')
-    imgui.SameLine(0, S(8))
-    imgui.SetNextItemWidth(S(130))
-    local buf = { opacity_number() }
-    local flags = ImGuiSliderFlags_AlwaysClamp
-    local changed
-    if flags then
-        changed = imgui.SliderInt('##tracker.opacity', buf, 0, 100, '%d', flags)
-    else
-        changed = imgui.SliderInt('##tracker.opacity', buf, 0, 100, '%d')
-    end
-    imgui.EndGroup()
-    local x1 = select(1, imgui.GetItemRectMin())
-    local x2 = select(1, imgui.GetItemRectMax())
-    mark_width((x2 - x1) + pad)
-    if changed then
-        ui.set_opacity(buf[1])
-    end
-end
-
 local function draw_header()
     local pad = indent_chrome()
     local h = S(18)
@@ -603,53 +513,37 @@ local function draw_header()
     local dl = imgui.GetWindowDrawList()
     local cy = y + h / 2
     local title_font = face('semi')
-    text_mid(dl, x, cy, 'Tracker', HEX.white, title_font, BODY)
+    text_mid(dl, x, cy, 'Tracker', HEX.white, title_font, BODY, panel.chrome)
     local title_w = measure('Tracker', title_font, BODY)
 
     local box = S(14) * 1.5
-    local gap = S(4)
     local content_left = x - pad
-    -- Title, a gap, the cog, a gap, the close mark, then S(6) before the content edge.
-    local min_span = pad + title_w + S(10) + box + gap + box + S(6)
+    local min_span = pad + title_w + S(10) + box + S(6)
     local span = math.max(panel.fit_w or 0, min_span)
     local right = content_left + span
     local close_cx = right - S(6) - box / 2
-    local cog_cx = close_cx - gap - box
 
-    local function hit(id, cx)
-        local rx, ry = imgui.GetCursorScreenPos()
-        imgui.SetCursorScreenPos({ cx - box / 2, cy - box / 2 })
-        imgui.InvisibleButton(id, { box, box })
-        local hovered = imgui.IsItemHovered()
-        local clicked = imgui.IsItemClicked(0)
-        imgui.SetCursorScreenPos({ rx, ry })
-        return hovered, clicked
-    end
-
-    local cog_hover, cog_click = hit('##tracker.cog', cog_cx)
-    if cog_click then
-        ui.opacity_open = not ui.opacity_open
-    end
-    if cog_hover then
-        show_tooltip('Background opacity')
-    end
-    glyph_cog(dl, cog_cx, cy, (cog_hover or ui.opacity_open) and HEX.teal or HEX.dim, 1.5)
-
-    local close_hover, close_click = hit('##tracker.close', close_cx)
-    if close_click then
+    local rx, ry = imgui.GetCursorScreenPos()
+    imgui.SetCursorScreenPos({ close_cx - box / 2, cy - box / 2 })
+    imgui.InvisibleButton('##tracker.close', { box, box })
+    local close_hover = imgui.IsItemHovered()
+    if imgui.IsItemClicked(0) then
         ui.show[1] = false
     end
-    glyph(dl, 'close', close_cx, cy, close_hover and HEX.rose or HEX.dim, 1.5)
-    mark_width(close_cx + box / 2 - content_left)
+    imgui.SetCursorScreenPos({ rx, ry })
 
-    if ui.opacity_open then
-        draw_opacity_slider()
-    end
+    local close_color = close_hover and HEX.rose or HEX.dim
+    glyph(dl, 'close', close_cx, cy, close_color, 1.5, panel.chrome)
+    mark_width(close_cx + box / 2 - content_left)
 
     local rule_y = select(2, imgui.GetCursorScreenPos())
     local rule_w = math.max(panel.fit_w or 0, close_cx + box / 2 - content_left)
-    dl:AddLine({ content_left, rule_y }, { content_left + rule_w, rule_y }, u32(HEX.border, panel.alpha), 1)
+    dl:AddLine({ content_left, rule_y }, { content_left + rule_w, rule_y }, u32(HEX.border, panel.chrome), 1)
     imgui.Dummy({ 0, S(2) })
+end
+
+local function section_gap()
+    imgui.Dummy({ 0, S(SECTION_GAP) })
 end
 
 local function draw_shadow()
@@ -659,7 +553,7 @@ local function draw_shadow()
     end
     local x, y = imgui.GetWindowPos()
     local w, h = imgui.GetWindowSize()
-    dl:AddRectFilled({ x - S(1), y + S(1) }, { x + w + S(1), y + h + S(3) }, u32('#000000', 0.35 * panel.alpha), S(6))
+    dl:AddRectFilled({ x - S(1), y + S(1) }, { x + w + S(1), y + h + S(3) }, u32('#000000', 0.35 * panel.chrome), S(6))
 end
 
 -- Links ------------------------------------------------------------------------
@@ -826,7 +720,7 @@ local function draw_goblins(saved)
     for _, npc in ipairs(dailies.order) do
         local row = rows[npc]
         if row ~= nil then
-            if row.status == 'complete' then
+            if dailies.is_complete(row) then
                 completed = completed + 1
                 draw_bar(1, '', COLORS.grey_bar, function()
                     imgui.TextColored(COLORS.grey_text, npc .. ': Complete!')
@@ -1095,7 +989,7 @@ local function has_goblin(saved)
     for _, npc in ipairs(dailies.order) do
         local row = rows[npc]
         if row ~= nil then
-            if row.status ~= 'complete' then
+            if not dailies.is_complete(row) then
                 return true
             end
             completed = completed + 1
@@ -1232,14 +1126,16 @@ function ui.render()
     local show_goblin = has_goblin(saved)
     local show_pala = has_pala(saved)
     local show_aman = has_aman()
-    if not show_goblin and not show_pala and not show_aman and not ui.opacity_open then
+    if not show_goblin and not show_pala and not show_aman then
         return
     end
 
     dailies.begin_frame()
-    panel.alpha = opacity_number() / 100
     update_scale()
     tick()
+    -- Last frame's hover drives this frame, because the window background is
+    -- chosen before Begin. The fade uses that same value for the title.
+    panel.chrome = ease('chrome', panel.hover and 1 or 0)
     fonts_begin()
 
     imgui.SetNextWindowSizeConstraints({ 0, 0 }, { FLT_MAX, FLT_MAX })
@@ -1265,6 +1161,9 @@ function ui.render()
     if imgui.Begin(LAYOUT_WINDOW, ui.show, win_flags) then
         local place_x, place_y = imgui.GetWindowPos()
         register_layout(place_x, place_y)
+        if imgui.IsWindowHovered then
+            panel.hover = imgui.IsWindowHovered() and true or false
+        end
         panel.fit_now = 0
         panel.zone_right = nil
         draw_header()
@@ -1277,14 +1176,14 @@ function ui.render()
         end
         if show_pala then
             if shown then
-                imgui.Spacing()
+                section_gap()
             end
             draw_palalumin(saved)
             shown = true
         end
         if show_aman then
             if shown then
-                imgui.Spacing()
+                section_gap()
             end
             if draw_section_header('AMAN Targets') then
                 draw_enemies(regime.view())
