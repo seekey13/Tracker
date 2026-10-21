@@ -5,6 +5,8 @@ The drawing is the Goldilox window: /vana colours, Segoe UI, folding
 small-cap headers, and one well per row. A teal meter is kill or item
 progress. Hold Shift to drag. The title, close mark, frame, and the
 gaps between sections fade out until the mouse is over the window.
+A section header lines up with its rows. That header and the ground
+behind those rows stay opaque.
 ]]
 
 local imgui = require('imgui')
@@ -256,8 +258,9 @@ local function glyph(dl, kind, cx, cy, hex, glyph_scale, alpha)
 end
 
 local folded = {}
--- chrome fades the frame, the title, and the gaps. Section groups stay solid.
-local panel = { chrome = 0, hover = false }
+-- chrome fades the frame, the title, and the gaps. A section plate stays
+-- opaque: the header and the ground behind its rows do not take the fade.
+local panel = { chrome = 0, hover = false, layered = false, plates = {} }
 
 local CHROME_PAD_X = 8
 local BAR_PAD_X = 4
@@ -303,7 +306,6 @@ end
 
 local function draw_section_header(text)
     local h = S(18)
-    local pad = indent_chrome()
     local x, y = imgui.GetCursorScreenPos()
     local title_font = face('semi_italic')
     local title = string.upper(text)
@@ -321,16 +323,19 @@ local function draw_section_header(text)
     local open = folded[text] ~= true
     local t = ease('fold.' .. text, hovered and 1 or 0)
     local dl = imgui.GetWindowDrawList()
+    local span = math.max(btn_w, panel.fit_w or 0)
+    -- Same left edge as the rows. Opaque even while the window frame fades.
+    fill(dl, x, y, span, h, HEX.bg, 0, 1)
     local cy = y + h / 2
     local color = mix(HEX.teal, HEX.white, t * 0.25)
     glyph(dl, open and 'down' or 'right', x + S(5), cy, hovered and HEX.teal or HEX.faint)
     text_spaced(dl, x + S(14), cy, title, color, title_font, SMALL, spacing)
     local line_x = x + S(14) + title_w + S(8)
-    local line_end = x + math.max(btn_w, (panel.fit_w or 0) - pad)
+    local line_end = x + span
     if line_end > line_x + S(4) then
         dl:AddLine({ line_x, cy }, { line_end, cy }, u32(HEX.teal, 0.85), 1)
     end
-    mark_width(pad + btn_w)
+    mark_width(btn_w)
     return open
 end
 
@@ -366,13 +371,22 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
     local has_meter = fraction ~= nil
     local pad_y = S(1)
     local dl = imgui.GetWindowDrawList()
-    local split = false
-    local ok_method, method = pcall(function() return dl.ChannelsSplit end)
-    if ok_method and type(method) == 'function' then
-        split = pcall(function()
-            dl:ChannelsSplit(2)
-            dl:ChannelsSetCurrent(1)
-        end)
+    -- outer: the window already split channels, so the well goes on the back
+    -- channel and must not merge that split. inner: this row splits for itself.
+    local layer = nil
+    if panel.layered then
+        layer = 'outer'
+    else
+        local ok_method, method = pcall(function() return dl.ChannelsSplit end)
+        if ok_method and type(method) == 'function' then
+            local split = pcall(function()
+                dl:ChannelsSplit(2)
+                dl:ChannelsSetCurrent(1)
+            end)
+            if split then
+                layer = 'inner'
+            end
+        end
     end
 
     imgui.BeginGroup()
@@ -415,6 +429,7 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
 
     local function paint_back()
         local radius = S(3)
+        -- Wells stay solid. The window frame's fade does not apply here.
         fill(dl, x1, y1, well_w, row_h, HEX.well, radius, 1)
         outline(dl, x1, y1, well_w, row_h, HEX.line, radius, 1)
         if not has_meter or well_w <= S(8) then
@@ -436,7 +451,11 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
         fill(dl, mx, my, math.max(mh, mw * frac), mh, meter, mh / 2, 1)
     end
 
-    if split then
+    if layer == 'outer' then
+        pcall(function() dl:ChannelsSetCurrent(1) end)
+        paint_back()
+        pcall(function() dl:ChannelsSetCurrent(2) end)
+    elseif layer == 'inner' then
         pcall(function() dl:ChannelsSetCurrent(0) end)
         paint_back()
         pcall(function() dl:ChannelsMerge() end)
@@ -455,13 +474,12 @@ local function draw_static(content_fn, add_spacing)
 end
 
 local function draw_notice(text, hex)
-    local pad = indent_chrome()
     local h = S(18)
     local tw = measure(text, face('text'), SMALL + 1)
     local w = tw + S(10)
     local x, y = imgui.GetCursorScreenPos()
     imgui.Dummy({ w, h })
-    mark_width(pad + w)
+    mark_width(w)
     local dl = imgui.GetWindowDrawList()
     fill(dl, x, y, w, h, hex, S(3), 0.12)
     local left = ImDrawFlags_RoundCornersLeft or ImDrawCornerFlags_Left
@@ -544,6 +562,71 @@ end
 
 local function section_gap()
     imgui.Dummy({ 0, S(SECTION_GAP) })
+end
+
+local function begin_layers(dl)
+    panel.plates = {}
+    panel.layered = false
+    panel.section_mark = nil
+    if dl == nil or dl.ChannelsSplit == nil then
+        return
+    end
+    local ok = pcall(function()
+        dl:ChannelsSplit(3)
+        dl:ChannelsSetCurrent(2)
+    end)
+    panel.layered = ok and true or false
+end
+
+local function section_begin()
+    local x, y = imgui.GetCursorScreenPos()
+    panel.section_mark = { x = x, y = y }
+end
+
+local function section_end()
+    local mark = panel.section_mark
+    panel.section_mark = nil
+    if mark == nil then
+        return
+    end
+    local _, y2 = imgui.GetItemRectMax()
+    local _, cursor_y = imgui.GetCursorScreenPos()
+    if cursor_y > y2 then
+        y2 = cursor_y
+    end
+    if y2 <= mark.y then
+        return
+    end
+    panel.plates[#panel.plates + 1] = { x = mark.x, y = mark.y, y2 = y2 }
+end
+
+-- Drawn on the back channel so row wells and labels stay above it.
+-- Alpha stays 1: only the frame outside these plates follows the hover fade.
+local function paint_plates(dl)
+    local plates = panel.plates or {}
+    panel.plates = {}
+    local w = math.max(panel.fit_w or 0, panel.fit_now or 0)
+    local function paint()
+        if w < 1 then
+            return
+        end
+        for _, plate in ipairs(plates) do
+            fill(dl, plate.x, plate.y, w, plate.y2 - plate.y, HEX.bg, 0, 1)
+        end
+    end
+    if not panel.layered then
+        panel.layered = false
+        return
+    end
+    local ok = pcall(function()
+        dl:ChannelsSetCurrent(0)
+        paint()
+        dl:ChannelsMerge()
+    end)
+    panel.layered = false
+    if not ok then
+        pcall(function() dl:ChannelsMerge() end)
+    end
 end
 
 local function draw_shadow()
@@ -722,9 +805,6 @@ local function draw_goblins(saved)
         if row ~= nil then
             if dailies.is_complete(row) then
                 completed = completed + 1
-                draw_bar(1, '', COLORS.grey_bar, function()
-                    imgui.TextColored(COLORS.grey_text, npc .. ': Complete!')
-                end)
             elseif row.status == 'return' then
                 draw_bar(1, '', COLORS.grey_bar, function()
                     imgui.TextColored(COLORS.grey_text, 'Return to ' .. npc .. '.')
@@ -788,12 +868,8 @@ local function draw_goblins(saved)
             end
         end
     end
-    if completed > 0 then
-        if saved.goldilox_time == saved.deadline then
-            draw_notice('Goldilox: Complete!', HEX.teal)
-        else
-            draw_notice('Goldilox: Reward not collected.', HEX.amber)
-        end
+    if completed > 0 and saved.goldilox_time ~= saved.deadline then
+        draw_notice('Goldilox: Reward not collected.', HEX.amber)
     end
 end
 
@@ -1166,32 +1242,41 @@ function ui.render()
         end
         panel.fit_now = 0
         panel.zone_right = nil
+        local layers = imgui.GetWindowDrawList()
+        begin_layers(layers)
         draw_header()
         local shown = false
         if show_goblin then
+            section_begin()
             if draw_section_header('Goblin Dailies') then
                 draw_goblins(saved)
             end
+            section_end()
             shown = true
         end
         if show_pala then
             if shown then
                 section_gap()
             end
+            section_begin()
             draw_palalumin(saved)
+            section_end()
             shown = true
         end
         if show_aman then
             if shown then
                 section_gap()
             end
+            section_begin()
             if draw_section_header('AMAN Targets') then
                 draw_enemies(regime.view())
             end
+            section_end()
         end
         if (panel.fit_now or 0) > 0 then
             panel.fit_w = panel.fit_now
         end
+        paint_plates(layers)
         draw_shadow()
     end
     imgui.End()

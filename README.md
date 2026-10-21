@@ -31,4 +31,4 @@ Closing the window is not remembered.
 
 The day rolls at Japanese midnight. That clears the dailies and leaves the AMAN regime alone.
 
-A goblin who says "Congratulations!" has finished that daily. The row shows Complete and keeps the zone or item from the earlier talk.
+A goblin who says "Congratulations!" has finished that daily. That row leaves the panel. Once every daily is finished and the Goldilox reward is collected, the section hides.
