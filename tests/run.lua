@@ -179,6 +179,7 @@ local title_alpha = nil
 local began = 0
 local slider_mode = 'idle'
 local slider_id = nil
+local click_id = nil
 
 local draw_list = {
     AddLine = function() end,
@@ -227,11 +228,19 @@ local imgui = {
     TextUnformatted = function() end,
     InvisibleButton = function(id)
         buttons[#buttons + 1] = id
+        if id == click_id then
+            world.arm_click = true
+        end
     end,
     IsItemHovered = function()
         return false
     end,
     IsItemClicked = function()
+        if world.arm_click then
+            world.arm_click = false
+            click_id = nil
+            return true
+        end
         return false
     end,
     IsWindowHovered = function()
@@ -881,6 +890,20 @@ local function has_solid_fill()
     return false
 end
 
+local function bg_rect(alpha)
+    local r, g, b = 0x16, 0x18, 0x22
+    return ((alpha * 256 + b) * 256 + g) * 256 + r
+end
+
+local function has_rect(col)
+    for _, painted in ipairs(rects) do
+        if painted == col then
+            return true
+        end
+    end
+    return false
+end
+
 world.level = 0
 ui.show[1] = true
 began = 0
@@ -973,6 +996,16 @@ render()
 eq(style_colors[3][4], 0, 'leaving the window fades the frame')
 eq(title_alpha, 0, 'leaving the window fades the title')
 truthy(has_solid_fill(), 'section wells stay solid after the fade')
+
+click_id = '##fold.Goblin Dailies'
+render()
+eq(has_text('Secret chest at '), false, 'a collapsed section hides its rows')
+truthy(has_rect(bg_rect(0)), 'a collapsed header fades with the frame')
+truthy(has_rect(bg_rect(255)), 'an open section stays opaque while another is collapsed')
+click_id = '##fold.Goblin Dailies'
+render()
+truthy(has_text('Secret chest at '), 'expanding the section shows its rows')
+eq(has_rect(bg_rect(0)), false, 'an open header stays opaque off the window')
 
 cfg.opacity = 40
 cfg.deadline = 0

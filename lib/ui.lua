@@ -5,8 +5,8 @@ The drawing is the Goldilox window: /vana colours, Segoe UI, folding
 small-cap headers, and one well per row. An amber meter is kill or item
 progress. Hold Shift to drag. The title, close mark, frame, and the
 gaps between sections fade out until the mouse is over the window.
-A section header lines up with its rows. That header and the ground
-behind those rows stay opaque.
+A section header lines up with its rows. An open section stays opaque.
+A collapsed header fades with the frame until the mouse is over the window.
 ]]
 
 local imgui = require('imgui')
@@ -168,7 +168,7 @@ local function text_mid(dl, x, cy, str, hex, font, size, alpha)
     end
 end
 
-local function text_spaced(dl, x, cy, str, hex, font, size, spacing)
+local function text_spaced(dl, x, cy, str, hex, font, size, spacing, alpha)
     local start = x
     local i, n = 1, #str
     while i <= n do
@@ -183,7 +183,7 @@ local function text_spaced(dl, x, cy, str, hex, font, size, spacing)
         end
         local letter = str:sub(i, i + len - 1)
         if dl ~= nil then
-            text_mid(dl, x, cy, letter, hex, font, size)
+            text_mid(dl, x, cy, letter, hex, font, size, alpha)
         end
         x = x + measure(letter, font, size) + spacing
         i = i + len
@@ -323,22 +323,27 @@ local function draw_section_header(text)
         folded[text] = not folded[text] or nil
     end
     local open = folded[text] ~= true
+    -- A collapsed header follows the frame fade. An open one stays solid.
+    local fade = open and 1 or panel.chrome
+    if panel.section_mark then
+        panel.section_mark.fade = fade
+    end
     local t = ease('fold.' .. text, hovered and 1 or 0)
     local dl = imgui.GetWindowDrawList()
     local span = math.max(btn_w, panel.fit_w or 0)
     -- The section plate paints this when layers are on. This covers the
     -- header when they are not, with the same rounded top.
     if not panel.layered then
-        fill(dl, x, y, span, h, HEX.bg, S(SECTION_RADIUS), 1)
+        fill(dl, x, y, span, h, HEX.bg, S(SECTION_RADIUS), fade)
     end
     local cy = y + h / 2
     local color = mix(HEX.teal, HEX.white, t * 0.25)
-    glyph(dl, open and 'down' or 'right', x + S(5), cy, hovered and HEX.teal or HEX.faint)
-    text_spaced(dl, x + S(14), cy, title, color, title_font, SMALL, spacing)
+    glyph(dl, open and 'down' or 'right', x + S(5), cy, hovered and HEX.teal or HEX.faint, nil, fade)
+    text_spaced(dl, x + S(14), cy, title, color, title_font, SMALL, spacing, fade)
     local line_x = x + S(14) + title_w + S(8)
     local line_end = x + span
     if line_end > line_x + S(4) then
-        dl:AddLine({ line_x, cy }, { line_end, cy }, u32(HEX.teal, 0.85), 1)
+        dl:AddLine({ line_x, cy }, { line_end, cy }, u32(HEX.teal, 0.85 * fade), 1)
     end
     mark_width(btn_w)
     return open
@@ -585,7 +590,7 @@ end
 
 local function section_begin()
     local x, y = imgui.GetCursorScreenPos()
-    panel.section_mark = { x = x, y = y }
+    panel.section_mark = { x = x, y = y, fade = 1 }
 end
 
 local function section_end()
@@ -602,11 +607,13 @@ local function section_end()
     if y2 <= mark.y then
         return
     end
-    panel.plates[#panel.plates + 1] = { x = mark.x, y = mark.y, y2 = y2 }
+    panel.plates[#panel.plates + 1] = {
+        x = mark.x, y = mark.y, y2 = y2, fade = mark.fade or 1,
+    }
 end
 
 -- Drawn on the back channel so row wells and labels stay above it.
--- Alpha stays 1: only the frame outside these plates follows the hover fade.
+-- An open plate stays opaque. A collapsed header uses the frame fade.
 local function paint_plates(dl)
     local plates = panel.plates or {}
     panel.plates = {}
@@ -616,7 +623,7 @@ local function paint_plates(dl)
             return
         end
         for _, plate in ipairs(plates) do
-            fill(dl, plate.x, plate.y, w, plate.y2 - plate.y, HEX.bg, S(SECTION_RADIUS), 1)
+            fill(dl, plate.x, plate.y, w, plate.y2 - plate.y, HEX.bg, S(SECTION_RADIUS), plate.fade or 1)
         end
     end
     if not panel.layered then

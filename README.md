@@ -14,7 +14,7 @@ The first time a character logs in, Tracker copies that character's `Goldilox-UI
 
 ## Window
 
-The panel lists Goblin Dailies, then Palalumin Quests, then AMAN Targets. A section hides once that work is finished. Each section sits apart from the next, so its rows stay with that header. Hold Shift to drag. The title, the close mark, the frame, and the gaps between sections fade out until the mouse is over the window, then the whole window comes back. The x closes the window until the next AMAN confirm, a restored hunt, or `/tracker ui`.
+The panel lists Goblin Dailies, then Palalumin Quests, then AMAN Targets. A section hides once that work is finished. Each section sits apart from the next, so its rows stay with that header. Hold Shift to drag. The title, the close mark, the frame, the gaps between sections, and a collapsed section header fade out until the mouse is over the window. An open section stays opaque. Then the whole window comes back. The x closes the window until the next AMAN confirm, a restored hunt, or `/tracker ui`.
 
 Closing the window is not remembered.
 
