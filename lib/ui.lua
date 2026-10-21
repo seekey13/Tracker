@@ -267,6 +267,8 @@ local BAR_PAD_X = 4
 local ROW_PAD_X = 6
 local ZONE_GAP = 8
 local SECTION_GAP = 12
+local TRAIN_PAD = 4
+local SECTION_RADIUS = 4
 
 local function indent_chrome()
     local x, y = imgui.GetCursorScreenPos()
@@ -324,8 +326,11 @@ local function draw_section_header(text)
     local t = ease('fold.' .. text, hovered and 1 or 0)
     local dl = imgui.GetWindowDrawList()
     local span = math.max(btn_w, panel.fit_w or 0)
-    -- Same left edge as the rows. Opaque even while the window frame fades.
-    fill(dl, x, y, span, h, HEX.bg, 0, 1)
+    -- The section plate paints this when layers are on. This covers the
+    -- header when they are not, with the same rounded top.
+    if not panel.layered then
+        fill(dl, x, y, span, h, HEX.bg, S(SECTION_RADIUS), 1)
+    end
     local cy = y + h / 2
     local color = mix(HEX.teal, HEX.white, t * 0.25)
     glyph(dl, open and 'down' or 'right', x + S(5), cy, hovered and HEX.teal or HEX.faint)
@@ -611,7 +616,7 @@ local function paint_plates(dl)
             return
         end
         for _, plate in ipairs(plates) do
-            fill(dl, plate.x, plate.y, w, plate.y2 - plate.y, HEX.bg, 0, 1)
+            fill(dl, plate.x, plate.y, w, plate.y2 - plate.y, HEX.bg, S(SECTION_RADIUS), 1)
         end
     end
     if not panel.layered then
@@ -981,7 +986,9 @@ local function draw_regime_line(state)
         return
     end
 
-    local start_x = select(1, imgui.GetCursorScreenPos())
+    local origin_x, origin_y = imgui.GetCursorScreenPos()
+    local start_x = origin_x + TRAIN_PAD
+    imgui.SetCursorScreenPos({ start_x, origin_y })
     if zone then
         imgui.TextColored(COLORS.white, 'Training in')
         imgui.SameLine(0, ZONE_GAP)
@@ -990,12 +997,13 @@ local function draw_regime_line(state)
         imgui.TextColored(COLORS.orange, 'Training area unknown')
     end
     local left_end = select(1, imgui.GetItemRectMax())
-    local natural = left_end - start_x
+    local natural = TRAIN_PAD + (left_end - start_x)
     if level then
         local level_text = 'Lv ' .. level
         local level_w = piece_w(level_text)
-        natural = natural + ZONE_GAP + level_w
-        local target_right = start_x + math.max(natural, panel.fit_w or 0)
+        natural = natural + ZONE_GAP + level_w + TRAIN_PAD
+        local fitted = math.max(natural, panel.fit_w or 0)
+        local target_right = origin_x + fitted - TRAIN_PAD
         local gap = target_right - left_end - level_w
         if gap < ZONE_GAP then
             gap = ZONE_GAP
