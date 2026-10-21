@@ -809,6 +809,50 @@ end
 
 local SEA = 'https://discord.com/channels/696847769444548700/1359317001457242192'
 
+local TRADE_LABEL = 'Trade'
+
+local function trade_button_size()
+    local tw, th = imgui.CalcTextSize(TRADE_LABEL)
+    if type(tw) == 'table' then
+        th = tw.y or tw[2] or 0
+        tw = tw.x or tw[1] or 0
+    end
+    tw = tonumber(tw) or 0
+    th = tonumber(th) or 0
+    local pad_x = S(6)
+    local pad_y = S(1)
+    return tw + pad_x * 2, th + pad_y * 2, pad_x, th
+end
+
+-- The hit target is invisible. The face drawn over it is the button, so a
+-- pending turn-in can go gray without a second widget.
+local function draw_trade_button(state)
+    local w, h, pad_x, th = trade_button_size()
+    pcall(imgui.AlignTextToFramePadding)
+    imgui.InvisibleButton('##pala.trade', { w, h })
+    local ready = state == 'ready'
+    local hot = ready and imgui.IsItemHovered()
+    local clicked = imgui.IsItemClicked(0)
+    local x1, y1 = imgui.GetItemRectMin()
+    local _, y2 = imgui.GetItemRectMax()
+    local dl = imgui.GetWindowDrawList()
+    local bg = HEX.off
+    local fg = HEX.dim
+    local edge = HEX.faint
+    if ready then
+        bg = hot and HEX.accent or HEX.accent_lo
+        fg = HEX.white
+        edge = HEX.accent
+    end
+    fill(dl, x1, y1, w, h, bg, S(3), 1)
+    outline(dl, x1, y1, w, h, edge, S(3), 1)
+    dl:AddText({ x1 + pad_x, (y1 + y2) / 2 - th / 2 }, u32(fg), TRADE_LABEL)
+    if hot then
+        show_tooltip('Trade these items to Palalumin')
+    end
+    return ready and clicked and true or false
+end
+
 local function draw_goblins(saved)
     local rows = saved.dailies or {}
     local completed = 0
@@ -938,6 +982,13 @@ local function draw_palalumin(saved)
                     end
                     imgui.SameLine()
                     imgui.TextColored(summary_label, ' ')
+                    local offer = dailies.trade_button(items)
+                    if offer then
+                        place_after(S(12), trade_button_size())
+                        if draw_trade_button(offer) then
+                            dailies.trade_start(items)
+                        end
+                    end
                 end, false)
             elseif name == 'Defeat mobs' and (row.killed and row.total or row.completed) then
                 local killed = row.killed or 0

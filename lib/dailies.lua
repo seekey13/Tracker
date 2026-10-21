@@ -9,6 +9,7 @@ inventory. The set resets at Japanese midnight.
 local chat = require('chat')
 local settingslib = require('settings')
 local P = require('lib.daily_parse')
+local trade = require('lib.trade')
 
 local dailies = {}
 
@@ -58,6 +59,7 @@ function dailies.roll_day()
     cfg.palalumin_quests = {}
     cfg.palalumin_flagged = false
     cfg.goldilox_time = nil
+    trade.cancel()
     cfg.version = 1
     cfg.deadline = deadline
     save()
@@ -367,6 +369,30 @@ end
 
 function dailies.pala_line(name, row)
     return pala_status(name, row)
+end
+
+-- nil hides the button. 'ready' can be clicked. 'wait' is the gray one.
+function dailies.trade_button(items)
+    return trade.button(items)
+end
+
+function dailies.trade_start(items)
+    if cfg == nil then
+        return false
+    end
+    local row = cfg.palalumin_quests and cfg.palalumin_quests['Item request']
+    if type(row) ~= 'table' or row.completed then
+        return false
+    end
+    return trade.start(items)
+end
+
+-- One attempt per frame. A sent turn-in arms the same completion flag a
+-- hand-traded 0x036 does, so "Quest Completed" can close the item row.
+function dailies.trade_update()
+    if trade.update() then
+        recent_trade = true
+    end
 end
 
 function dailies.report()

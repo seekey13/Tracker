@@ -195,6 +195,9 @@ local draw_list = {
         if str == 'Tracker' and type(col) == 'number' then
             title_alpha = math.floor(col / 16777216)
         end
+        if str == 'Trade' then
+            world.trade_color = col
+        end
         if type(str) == 'string' and #str > 1 then
             drawn[#drawn + 1] = str
         end
@@ -859,6 +862,7 @@ local function render()
     style_colors, dummies, rects = {}, {}, {}
     title_alpha = nil
     slider_id = nil
+    world.trade_color = nil
     local ok, err = xpcall(ui.render, debug.traceback)
     if not ok then
         fail('render\n' .. tostring(err))
@@ -1038,4 +1042,445 @@ render()
 eq(began, 0, 'a finished day draws nothing')
 
 os.execute('rmdir /s /q "' .. layout_root .. '" >nul 2>&1')
+
+local trade = require('lib.trade')
+
+local function hex_to_bin(text)
+    return (text:gsub('%s', ''):gsub('%x%x', function(byte)
+        return string.char(tonumber(byte, 16))
+    end))
+end
+
+local function packet_matches(packet, hex, why)
+    local want = hex_to_bin(hex)
+    eq(#packet, 64, why .. ' length')
+    local got = packet:sub(5)
+    local body = want:sub(5)
+    eq(#got, #body, why .. ' body length')
+    for i = 1, #body do
+        if got:byte(i) ~= body:byte(i) then
+            eq(got:byte(i), body:byte(i), string.format('%s byte 0x%02X', why, i + 3))
+            return
+        end
+    end
+    eq(true, true, why)
+end
+
+-- The bytes XIIM captured from the client's own 0x036 packets. The first four
+-- are the header Ashita writes, so the body comparison starts at byte 5.
+packet_matches(trade.build_trade(0x010F581D, 0x071D, {
+    { slot = 0x29, count = 10 }, { slot = 0x18, count = 1 },
+    { slot = 0x02, count = 9 }, { slot = 0x0A, count = 3 },
+    { slot = 0x2A, count = 3 }, { slot = 0x47, count = 9 },
+    { slot = 0x1D, count = 12 }, { slot = 0x13, count = 1 },
+}), [[
+    36 20 1C 17 1D 58 0F 01 0A 00 00 00 01 00 00 00
+    09 00 00 00 03 00 00 00 03 00 00 00 09 00 00 00
+    0C 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00
+    29 18 02 0A 2A 47 1D 13 00 00 1D 07 08 00 00 00
+]], '8-entry trade')
+packet_matches(trade.build_trade(0x010F581D, 0x071D, {
+    { slot = 0x44, count = 1 }, { slot = 0x3A, count = 1 }, { slot = 0x0D, count = 1 },
+}), [[
+    36 20 92 1A 1D 58 0F 01 01 00 00 00 01 00 00 00
+    01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+    44 3A 0D 00 00 00 00 00 00 00 1D 07 03 00 00 00
+]], '3-entry trade')
+
+local function read_u32(bytes, index)
+    return bytes[index] + bytes[index + 1] * 256 + bytes[index + 2] * 65536 + bytes[index + 3] * 16777216
+end
+
+local function read_u16(bytes, index)
+    return bytes[index] + bytes[index + 1] * 256
+end
+
+local function rgba_u32(hex)
+    local r = tonumber(hex:sub(2, 3), 16)
+    local g = tonumber(hex:sub(4, 5), 16)
+    local b = tonumber(hex:sub(6, 7), 16)
+    return ((255 * 256 + b) * 256 + g) * 256 + r
+end
+
+local slots = {
+    [0] = { Id = 1001, Count = 99, Flags = 0 },
+    [1] = { Id = 1001, Count = 12, Flags = 0 },
+    [2] = { Id = 1002, Count = 5, Flags = 0 },
+    [3] = { Id = 1003, Count = 9, Flags = 0 },
+    [4] = { Id = 1001, Count = 12, Flags = 1 },
+}
+local max_slot = 80
+local actors = {
+    [10] = { name = 'Player', id = 1, flags = 0, dist = 0, status = 0 },
+    [1794] = { name = 'Palalumin', id = 16918530, flags = 0x200, dist = 0.25, status = 0 },
+}
+local captured = {}
+local names = {
+    [1001] = 'Phuabo Organ',
+    [1002] = 'Xzomit Organ',
+    [1003] = 'Yovra Organ',
+}
+local old_memory = AshitaCore.GetMemoryManager
+local old_resources = AshitaCore.GetResourceManager
+local old_packets = AshitaCore.GetPacketManager
+
+AshitaCore.GetMemoryManager = function()
+    return {
+        GetPlayer = function()
+            return { GetMainJobLevel = function() return world.level end }
+        end,
+        GetParty = function()
+            return {
+                GetMemberZone = function() return world.zone end,
+                GetMemberTargetIndex = function() return 10 end,
+            }
+        end,
+        GetTarget = function()
+            return {
+                GetIsSubTargetActive = function() return 0 end,
+                GetTargetIndex = function() return 1 end,
+            }
+        end,
+        GetInventory = function()
+            return {
+                GetContainerCountMax = function() return max_slot end,
+                GetContainerItem = function(_, _, slot)
+                    return slots[slot] or { Id = 0, Count = 0, Flags = 0 }
+                end,
+            }
+        end,
+        GetEntity = function()
+            return {
+                GetName = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.name or ''
+                end,
+                GetServerId = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.id or 0
+                end,
+                GetRenderFlags0 = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.flags or 0
+                end,
+                GetDistance = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.dist or 10000
+                end,
+                GetStatus = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.status or 0
+                end,
+            }
+        end,
+    }
+end
+AshitaCore.GetResourceManager = function()
+    return {
+        GetString = function() return world.zone_name end,
+        GetItemByName = function(_, item_name)
+            if type(item_name) ~= 'string' then
+                return nil
+            end
+            for id, item_name_known in pairs(names) do
+                if item_name_known:lower() == item_name:lower() then
+                    return { Id = id, Name = { item_name_known } }
+                end
+            end
+            return nil
+        end,
+        GetItemById = function(_, id)
+            local item_name = names[id]
+            if not item_name then
+                return nil
+            end
+            return { Id = id, Name = { item_name } }
+        end,
+    }
+end
+AshitaCore.GetPacketManager = function()
+    return {
+        AddOutgoingPacket = function(_, id, data)
+            captured[#captured + 1] = { id = id, data = data }
+        end,
+    }
+end
+
+local needs = {
+    { name = 'Phuabo Organ', needed = 10 },
+    { name = 'Xzomit Organ', needed = 5 },
+}
+local npc = actors[1794]
+
+local function offer()
+    return dailies.trade_button(needs)
+end
+
+clock = 100000
+world.zone = 34
+eq(offer(), 'ready', 'HuXzoi within 3 yalms can trade')
+npc.dist = 9
+eq(offer(), 'ready', '3 yalms is in range')
+npc.dist = 9.01
+eq(offer(), nil, 'past 3 yalms hides the button')
+npc.dist = 36
+eq(offer(), nil, '6 yalms is not close enough')
+npc.dist = 0.25
+npc.flags = 0
+eq(offer(), nil, 'an unrendered Palalumin is ignored')
+npc.flags = 0x200
+npc.id = 0
+eq(offer(), nil, 'a Palalumin with no id is ignored')
+npc.id = 16918530
+local saved_name = npc.name
+npc.name = 'Not Palalumin'
+eq(offer(), nil, 'a different npc is ignored')
+npc.name = saved_name
+world.zone = 33
+eq(offer(), nil, 'AlTaieu hides the button')
+world.zone = 35
+eq(offer(), nil, 'RuHmet hides the button')
+world.zone = 245
+eq(offer(), nil, 'Jeuno hides the button')
+world.zone = 34
+eq(offer(), 'ready', 'back in HuXzoi the button returns')
+
+local held = slots[1]
+slots[1] = { Id = 1001, Count = 12, Flags = 1 }
+eq(offer(), nil, 'locked stacks are not tradable')
+slots[1] = { Id = 1001, Count = 4, Flags = 0 }
+eq(offer(), nil, 'slot 0 is not a trade slot')
+slots[1] = held
+
+local function check_turnin(packet, why)
+    eq(packet.id, 0x36, why .. ' id')
+    local data = packet.data
+    eq(type(data), 'table', why .. ' bytes')
+    eq(#data, 64, why .. ' size')
+    eq(read_u32(data, 5), 16918530, why .. ' npc id')
+    eq(read_u32(data, 9), 10, why .. ' phuabo count')
+    eq(read_u32(data, 13), 5, why .. ' xzomit count')
+    eq(read_u32(data, 17), 0, why .. ' no third stack')
+    eq(data[49], 1, why .. ' first slot')
+    eq(data[50], 2, why .. ' second slot')
+    eq(data[51], 0, why .. ' no third slot')
+    eq(read_u16(data, 59), 1794, why .. ' npc index')
+    eq(data[61], 2, why .. ' entry count')
+end
+
+cfg.palalumin_flagged = true
+cfg.palalumin_quests = {
+    ['Item request'] = {
+        items = 'Phuabo Organ x10, Xzomit Organ x5',
+        message = 'Phuabo Organ x10, Xzomit Organ x5',
+    },
+}
+
+actors[10].status = 4
+truthy(dailies.trade_start(needs), 'queue the turn-in')
+dailies.trade_update()
+eq(#captured, 0, 'no trade while an event is open')
+eq(offer(), 'wait', 'the button waits out the event')
+eq(dailies.trade_start(needs), false, 'a second click does not queue another')
+actors[10].status = 0
+dailies.trade_update()
+eq(#captured, 1, 'one trade once the event ends')
+check_turnin(captured[1], 'turn-in')
+dailies.trade_update()
+eq(#captured, 1, 'the next frame does not trade again')
+
+clock = 100002
+dailies.trade_update()
+eq(#captured, 1, 'two seconds does not finish the wait')
+eq(offer(), 'wait', 'the button stays gray during the wait')
+eq(dailies.trade_start(needs), false, 'three seconds have not elapsed')
+
+clock = 100010
+actors[10].status = 4
+dailies.trade_update()
+eq(#captured, 1, 'the open event still blocks another trade')
+eq(offer(), 'wait', 'the button stays down through the event')
+actors[10].status = 0
+dailies.trade_update()
+eq(offer(), 'ready', 'the button returns after the event and the delay')
+truthy(dailies.trade_start(needs), 'a later turn-in is allowed')
+dailies.trade_update()
+eq(#captured, 2, 'the later turn-in is a single packet')
+check_turnin(captured[2], 'second turn-in')
+clock = 100012
+eq(dailies.trade_start(needs), false, 'the next trade waits three seconds')
+dailies.trade_update()
+eq(#captured, 2, 'no packet during that delay')
+
+local saved_count = slots[1].Count
+clock = 100020
+trade.cancel()
+truthy(dailies.trade_start(needs), 'queue a stack that then changes')
+slots[1].Count = 3
+dailies.trade_update()
+eq(#captured, 2, 'a short stack is not traded')
+eq(offer(), nil, 'the button hides once the items are short')
+slots[1].Count = saved_count
+
+local original_slots = {
+    [0] = slots[0],
+    [1] = slots[1],
+    [2] = slots[2],
+    [3] = slots[3],
+    [4] = slots[4],
+}
+local holder = { slots = original_slots, max_slot = 80 }
+AshitaCore.GetMemoryManager = function()
+    return {
+        GetPlayer = function()
+            return { GetMainJobLevel = function() return world.level end }
+        end,
+        GetParty = function()
+            return {
+                GetMemberZone = function() return world.zone end,
+                GetMemberTargetIndex = function() return 10 end,
+            }
+        end,
+        GetTarget = function()
+            return {
+                GetIsSubTargetActive = function() return 0 end,
+                GetTargetIndex = function() return 1 end,
+            }
+        end,
+        GetInventory = function()
+            return {
+                GetContainerCountMax = function() return holder.max_slot end,
+                GetContainerItem = function(_, _, slot)
+                    return holder.slots[slot] or { Id = 0, Count = 0, Flags = 0 }
+                end,
+            }
+        end,
+        GetEntity = function()
+            return {
+                GetName = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.name or ''
+                end,
+                GetServerId = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.id or 0
+                end,
+                GetRenderFlags0 = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.flags or 0
+                end,
+                GetDistance = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.dist or 10000
+                end,
+                GetStatus = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.status or 0
+                end,
+            }
+        end,
+    }
+end
+
+holder.max_slot = 9
+holder.slots = {}
+for slot = 1, 9 do
+    holder.slots[slot] = { Id = 1001, Count = 1, Flags = 0 }
+end
+eq(dailies.trade_button({ { name = 'Phuabo Organ', needed = 9 } }), nil, 'nine stacks do not fit one trade')
+eq(dailies.trade_start({ { name = 'Phuabo Organ', needed = 9 } }), false, 'nine stacks are not sent')
+eq(#captured, 2, 'a refused trade sends nothing')
+holder.max_slot = 8
+holder.slots[9] = nil
+clock = clock + 3
+truthy(dailies.trade_start({ { name = 'Phuabo Organ', needed = 8 } }), 'eight stacks fit one trade')
+dailies.trade_update()
+eq(#captured, 3, 'eight stacks are one packet')
+eq(captured[3].data[61], 8, 'eight entries')
+for i = 1, 8 do
+    eq(captured[3].data[48 + i], i, 'eight-stack slot ' .. i)
+    eq(read_u32(captured[3].data, 9 + (i - 1) * 4), 1, 'eight-stack count ' .. i)
+end
+
+holder.slots = original_slots
+holder.max_slot = 80
+clock = clock + 3
+trade.cancel()
+cfg.palalumin_flagged = true
+cfg.palalumin_quests = {
+    ['Item request'] = {
+        items = 'Phuabo Organ x10, Xzomit Organ x5',
+        message = 'Phuabo Organ x10, Xzomit Organ x5',
+    },
+}
+cfg.dailies = {}
+ui.show[1] = true
+world.level = 75
+world.zone = 34
+npc.dist = 0.25
+npc.flags = 0x200
+npc.id = 16918530
+actors[10].status = 0
+
+render()
+truthy(has_drawn('Trade'), 'the row shows Trade]')
+eq(world.trade_color, rgba_u32('#FFFFFF'), 'the trade button is lit')
+local trade_i = button_at('##pala.trade')
+local pala_header = button_at('##fold.Palalumin Quests')
+truthy(trade_i and pala_header and pala_header < trade_i, 'the trade button is on the palalumin row')
+
+holder.slots[2].Count = 0
+render()
+eq(button_at('##pala.trade'), nil, 'missing items hide the button')
+eq(world.trade_color, nil, 'missing items draw no label')
+holder.slots[2].Count = 5
+
+world.zone = 33
+render()
+eq(button_at('##pala.trade'), nil, 'the button is not drawn outside HuXzoi')
+world.zone = 34
+npc.dist = 36
+render()
+eq(button_at('##pala.trade'), nil, 'the button is not drawn out of range')
+npc.dist = 0.25
+render()
+eq(world.trade_color, rgba_u32('#FFFFFF'), 'the button returns in range')
+
+cfg.palalumin_quests['Item request'].completed = true
+eq(dailies.trade_start(needs), false, 'a finished request is not traded')
+cfg.palalumin_quests['Item request'].completed = nil
+
+click_id = '##pala.trade'
+render()
+eq(offer(), 'wait', 'the click leaves the turn-in pending')
+render()
+eq(world.trade_color, rgba_u32('#7B8095'), 'a pending trade button is gray')
+local sent_before = #captured
+handlers.d3d_present()
+eq(#captured, sent_before + 1, 'present sends the one queued trade')
+check_turnin(captured[#captured], 'row trade')
+handlers.d3d_present()
+eq(#captured, sent_before + 1, 'present does not send a second trade')
+click_id = '##pala.trade'
+render()
+eq(world.trade_color, rgba_u32('#7B8095'), 'the gray button stays gray')
+handlers.d3d_present()
+eq(#captured, sent_before + 1, 'clicking the gray button does not trade')
+
+clock = clock + 3
+actors[10].status = 0
+dailies.trade_update()
+world.target = 'Palalumin'
+text_in('Quest Completed', 121)
+cfg.palalumin_quests['Item request'].completed = nil
+truthy(dailies.trade_start(needs), 'queue the completion trade')
+dailies.trade_update()
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'sending does not finish the quest by itself')
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, true, 'the issued trade completes the item request')
+
+AshitaCore.GetMemoryManager = old_memory
+AshitaCore.GetResourceManager = old_resources
+AshitaCore.GetPacketManager = old_packets
 finish()
