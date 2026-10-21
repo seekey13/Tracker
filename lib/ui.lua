@@ -2,7 +2,7 @@
 Tracker - one Vanacore panel.
 
 The drawing is the Goldilox window: /vana colours, Segoe UI, folding
-small-cap headers, and one well per row. A teal meter is kill or item
+small-cap headers, and one well per row. An amber meter is kill or item
 progress. Hold Shift to drag. The title, close mark, frame, and the
 gaps between sections fade out until the mouse is over the window.
 A section header lines up with its rows. That header and the ground
@@ -449,9 +449,9 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
         if frac <= 0 then
             return
         end
-        local meter = HEX.teal
+        local meter = HEX.amber
         if bar_color == COLORS.dark_grey then
-            meter = mix(HEX.teal, HEX.off, 0.45)
+            meter = mix(HEX.amber, HEX.off, 0.45)
         end
         fill(dl, mx, my, math.max(mh, mw * frac), mh, meter, mh / 2, 1)
     end
