@@ -28,6 +28,7 @@ end
 
 local defaults = T{
     opacity = 100,
+    scale = 1,
     migrated = false,
     offset = 60 * 60 * 9,
     deadline = 0,
@@ -192,7 +193,7 @@ local function help()
     printf('  /tracker clear       Clear the AMAN regime')
     printf('  /tracker debug       Toggle death-packet logging')
     printf('  /tracker test <name> Test an enemy name against the regime')
-    printf('Hold Shift to drag. The frame fades until the mouse is over the window. The x closes it.')
+    printf('Hold Shift to drag. The frame fades until the mouse is over the window. The cog scales it. The x closes it.')
     printf('/at, /goldilox and /dailies still work.')
 end
 
@@ -236,6 +237,10 @@ local function on_command(args)
     return true
 end
 
+ashita.events.register('load', 'tracker_load', function()
+    ui.bake()
+end)
+
 ashita.events.register('text_in', 'tracker_text_in', function(e)
     if e.injected then
         return
@@ -267,6 +272,7 @@ end)
 ashita.events.register('d3d_present', 'tracker_present', function()
     dailies.roll_day()
     ui.render()
+    dailies.trade_update()
 end)
 
 ashita.events.register('key', 'tracker_key', function(e)
