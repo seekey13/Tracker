@@ -181,6 +181,8 @@ local tips, tooltip_depth = {}, 0
 local sequence = {}
 local slider_mode = 'idle'
 local slider_id = nil
+local slider_range = nil
+local circles = 0
 local click_id = nil
 
 -- Fonts the way ImGui keeps them: one stack, and a font scale per window.
@@ -205,6 +207,9 @@ local draw_list = {
         sequence[#sequence + 1] = { 'rect', col }
     end,
     AddTriangleFilled = function() end,
+    AddCircleFilled = function()
+        circles = circles + 1
+    end,
     ChannelsSplit = function() end,
     ChannelsSetCurrent = function() end,
     ChannelsMerge = function() end,
@@ -317,13 +322,18 @@ local imgui = {
     SetNextWindowSizeConstraints = function() end,
     SetNextItemWidth = function() end,
     AlignTextToFramePadding = function() end,
-    SliderInt = function(id, buf)
+    -- slider_mode: 'idle', or a number the drag moves the slider to.
+    SliderFloat = function(id, buf, min, max)
         slider_id = id
-        if slider_mode == 'set25' then
-            buf[1] = 25
+        slider_range = { min, max }
+        if type(slider_mode) == 'number' then
+            buf[1] = slider_mode
             return true
         end
         return false
+    end,
+    IsItemActive = function()
+        return world.slider_held and true or false
     end,
     Begin = function()
         began = began + 1
@@ -906,7 +916,7 @@ local function render(target)
     buttons, texts, drawn = {}, {}, {}
     style_colors, dummies, rects = {}, {}, {}
     title_alpha = nil
-    slider_id = nil
+    slider_id, slider_range, circles = nil, nil, 0
     world.trade_color = nil
     tips, tooltip_depth = {}, 0
     sequence = {}
@@ -936,8 +946,8 @@ local function sized_pushes()
     return n
 end
 
-local function count_gaps()
-    local gap = scaled(12)
+local function count_gaps(size)
+    local gap = size or scaled(12)
     local n = 0
     for _, size in ipairs(dummies) do
         if size[1] == 0 and size[2] == gap then
@@ -1037,8 +1047,11 @@ local goblin_i = button_at('##fold.Goblin Dailies')
 local pala_i = button_at('##fold.Palalumin Quests')
 local aman_i = button_at('##fold.AMAN Targets')
 local close_i = button_at('##tracker.close')
-eq(button_at('##tracker.cog'), nil, 'the gear is gone')
+local cog_i = button_at('##tracker.cog')
 truthy(close_i ~= nil, 'close mark is still there')
+truthy(cog_i and close_i and cog_i < close_i, 'the cog is left of the close mark')
+eq(circles, 2, 'the cog is a body and its hole')
+eq(slider_id, nil, 'the scale slider starts closed')
 truthy(goblin_i and pala_i and aman_i and goblin_i < pala_i and pala_i < aman_i, 'section order')
 eq(has_text('Beetrix: Complete!'), false, 'a finished goblin stays off the panel')
 truthy(has_text('Secret chest at '), 'an open goblin stays')
@@ -1096,6 +1109,67 @@ click_id = '##fold.Goblin Dailies'
 render()
 truthy(has_text('Secret chest at '), 'expanding the section shows its rows')
 eq(has_rect(bg_rect(0)), false, 'an open header stays opaque off the window')
+
+-- The cog opens the scale slider. A drag moves the saved value at once. The
+-- window takes it up, and it is saved, once the slider is let go.
+local function count_rect(col)
+    local n = 0
+    for _, painted in ipairs(rects) do
+        if painted == col then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+eq(cfg.scale, 1, 'scale defaults to 1x')
+eq(ui.scale(), 1, 'the window starts at 1x')
+local opaque_grounds = count_rect(bg_rect(255))
+click_id = '##tracker.cog'
+render()
+eq(ui.scale_open, true, 'the cog opens the scale slider')
+eq(count_rect(bg_rect(255)), opaque_grounds + 1, 'the scale row stays opaque while the frame is clear')
+eq(slider_id, '##tracker.scale', 'the scale slider shows once the cog opens it')
+eq(slider_range and slider_range[1], 0.5, 'the scale slider starts at 0.5x')
+eq(slider_range and slider_range[2], 2, 'the scale slider ends at 2x')
+local saves_before = saves
+world.slider_held = true
+slider_mode = 2
+render()
+eq(cfg.scale, 2, 'a drag sets the scale')
+eq(saves, saves_before, 'a drag does not save')
+render()
+eq(count_gaps(), 2, 'the window keeps its size while the slider is held')
+world.slider_held = false
+slider_mode = 'idle'
+render()
+eq(saves, saves_before + 1, 'letting go saves the scale')
+render()
+eq(count_gaps(math.floor(12 * 1.1 * 2 + 0.5)), 2, 'letting go takes the new scale up')
+truthy(ui.set_scale(9), 'set_scale takes a number')
+eq(cfg.scale, 2, 'scale stops at 2x')
+ui.set_scale(0.1)
+eq(cfg.scale, 0.5, 'scale stops at 0.5x')
+ui.set_scale(1.234)
+eq(cfg.scale, 1.23, 'scale keeps hundredths')
+eq(ui.set_scale('big'), false, 'a word is not a scale')
+cfg.scale = 7
+eq(ui.scale(), 2, 'a saved scale past 2x reads as 2x')
+cfg.scale = 'x'
+eq(ui.scale(), 1, 'a bad saved scale reads as 1x')
+cfg.scale = 1
+click_id = '##tracker.cog'
+render()
+eq(ui.scale_open, false, 'the cog closes the scale slider')
+eq(slider_id, nil, 'a closed scale slider is not drawn')
+eq(count_gaps(), 2, 'the window is back at 1x')
+click_id = '##tracker.cog'
+render()
+click_id = '##tracker.close'
+render()
+eq(ui.show[1], false, 'the x closes the window')
+eq(ui.scale_open, false, 'the x closes the scale slider too')
+ui.show[1] = true
 
 world.hover_items = true
 render()
@@ -1160,6 +1234,11 @@ clock = clock + 1
 render()
 clock = clock + 1
 render()
+ui.scale_open = true
+render()
+render()
+truthy(laid_under(bg_rect(255), 'text', 'Scale'), 'without channels the scale row ground stays opaque')
+ui.scale_open = false
 draw_list.ChannelsSplit = channels_split
 
 cfg.opacity = 40

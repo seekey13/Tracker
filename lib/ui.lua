@@ -7,9 +7,12 @@ progress. Hold Shift to drag. The title, close mark, frame, and the
 gaps between sections fade out until the mouse is over the window.
 A section header lines up with its rows. An open section stays opaque.
 A collapsed header fades with the frame until the mouse is over the window.
+The cog left of the close mark opens a scale slider, 0.5x to 2x. The
+window takes the new size once the slider is let go.
 ]]
 
 local imgui = require('imgui')
+local settingslib = require('settings')
 local dailies = require('lib.dailies')
 local regime = require('lib.regime')
 local family = require('lib.family')
@@ -18,6 +21,7 @@ local parse = require('lib.daily_parse')
 local ui = {}
 ui.show = { true }
 ui.shift_held = false
+ui.scale_open = false
 
 local HEX = {
     bg = '#161822', border = '#2A2E3E', line = '#242838', well = '#0E1017',
@@ -71,13 +75,18 @@ local function S(n)
     return math.floor(n * scale + 0.5)
 end
 
+-- The slider's scale. It is taken up only while the slider is not held, or
+-- the window would resize and move the slider under the mouse.
+local user_scale = 1
+local SCALE_MIN, SCALE_MAX = 0.5, 2
+
 local function update_scale()
     local h = 1080
     local ok, io = pcall(imgui.GetIO)
     if ok and io and io.DisplaySize then
         h = tonumber(io.DisplaySize.y) or h
     end
-    scale = math.max(0.75, math.min(1.6, h / 1440)) * 1.1
+    scale = math.max(0.75, math.min(1.6, h / 1440)) * 1.1 * user_scale
 end
 
 local BODY, SMALL = 16, 13.5
@@ -271,6 +280,14 @@ local function ease(id, target)
     return v
 end
 
+-- A filled triangle, wound clockwise on screen as ImGui's anti-aliasing expects.
+local function tri(dl, a, b, c, col)
+    if (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]) < 0 then
+        b, c = c, b
+    end
+    dl:AddTriangleFilled(a, b, c, col)
+end
+
 local function glyph(dl, kind, cx, cy, hex, glyph_scale, alpha)
     local k = S(11) / 24 * (glyph_scale or 1)
     local col = u32(hex, alpha)
@@ -284,6 +301,22 @@ local function glyph(dl, kind, cx, cy, hex, glyph_scale, alpha)
     elseif kind == 'close' then
         dl:AddLine(p(6, 6), p(18, 18), col, thickness)
         dl:AddLine(p(18, 6), p(6, 18), col, thickness)
+    elseif kind == 'cog' then
+        -- Sidekick3's cog: eight teeth, one straight up, trapezoids from radius
+        -- 7 to 12 round a body of 9. The hole of 4 is the window ground, which
+        -- fades with the cog.
+        dl:AddCircleFilled({ cx, cy }, 9 * k, col, 24)
+        for i = 0, 7 do
+            local a = i * math.pi / 4
+            local dx, dy = math.sin(a), -math.cos(a)
+            local function q(r, w)
+                return { cx + (dx * r - dy * w) * k, cy + (dy * r + dx * w) * k }
+            end
+            local b1, b2, t1, t2 = q(7, -2.8), q(7, 2.8), q(12, -2.2), q(12, 2.2)
+            tri(dl, b1, b2, t2, col)
+            tri(dl, b1, t2, t1, col)
+        end
+        dl:AddCircleFilled({ cx, cy }, 4 * k, u32(HEX.bg, alpha), 24)
     else
         dl:AddLine(p(5, 9), p(12, 16), col, thickness)
         dl:AddLine(p(12, 16), p(19, 9), col, thickness)
@@ -585,64 +618,6 @@ local function pop_window_style()
     imgui.PopStyleColor(style_count)
 end
 
-local function draw_header()
-    local pad = indent_chrome()
-    local h = S(18)
-    local x, y = imgui.GetCursorScreenPos()
-    imgui.Dummy({ 0, h })
-    local dl = imgui.GetWindowDrawList()
-    local cy = y + h / 2
-    local title_font = face('semi')
-    text_mid(dl, x, cy, 'Tracker', HEX.white, title_font, BODY, panel.chrome)
-    local title_w = measure('Tracker', title_font, BODY)
-
-    local box = S(14) * 1.5
-    local content_left = x - pad
-    local min_span = pad + title_w + S(10) + box + S(6)
-    local span = math.max(panel.fit_w or 0, min_span)
-    local right = content_left + span
-    local close_cx = right - S(6) - box / 2
-
-    local rx, ry = imgui.GetCursorScreenPos()
-    imgui.SetCursorScreenPos({ close_cx - box / 2, cy - box / 2 })
-    imgui.InvisibleButton('##tracker.close', { box, box })
-    local close_hover = imgui.IsItemHovered()
-    if imgui.IsItemClicked(0) then
-        ui.show[1] = false
-    end
-    imgui.SetCursorScreenPos({ rx, ry })
-
-    local close_color = close_hover and HEX.rose or HEX.dim
-    glyph(dl, 'close', close_cx, cy, close_color, 1.5, panel.chrome)
-    -- Mark what the header needs, not where the close mark landed. The close
-    -- mark follows fit_w, so its spot would hold a too-wide frame for frames.
-    mark_width(min_span - S(6))
-
-    local rule_y = select(2, imgui.GetCursorScreenPos())
-    local rule_w = math.max(panel.fit_w or 0, close_cx + box / 2 - content_left)
-    dl:AddLine({ content_left, rule_y }, { content_left + rule_w, rule_y }, u32(HEX.border, panel.chrome), 1)
-    imgui.Dummy({ 0, S(2) })
-end
-
-local function section_gap()
-    imgui.Dummy({ 0, S(SECTION_GAP) })
-end
-
-local function begin_layers(dl)
-    panel.plates = {}
-    panel.layered = false
-    panel.section_mark = nil
-    panel.section_key = nil
-    if dl == nil or dl.ChannelsSplit == nil then
-        return
-    end
-    local ok = pcall(function()
-        dl:ChannelsSplit(3)
-        dl:ChannelsSetCurrent(2)
-    end)
-    panel.layered = ok and true or false
-end
-
 local function section_begin(title)
     local x, y = imgui.GetCursorScreenPos()
     local fade = folded[title] and panel.chrome or 1
@@ -674,6 +649,151 @@ local function section_end()
     panel.plates[#panel.plates + 1] = {
         x = mark.x, y = mark.y, y2 = y2, fade = mark.fade or 1,
     }
+end
+
+-- The saved scale, held to the slider's range.
+function ui.scale()
+    local saved = dailies.settings()
+    local n = saved and tonumber(saved.scale) or 1
+    return math.max(SCALE_MIN, math.min(SCALE_MAX, n))
+end
+
+-- Held to the range and to hundredths, as the slider shows it. The slider
+-- saves once it is let go.
+function ui.set_scale(n)
+    local saved = dailies.settings()
+    n = tonumber(n)
+    if saved == nil or n == nil then
+        return false
+    end
+    n = math.max(SCALE_MIN, math.min(SCALE_MAX, n))
+    saved.scale = math.floor(n * 100 + 0.5) / 100
+    return true
+end
+
+-- The scale row under the title. It sits on a plate, so it stays opaque as
+-- an open section does. The value moves with a drag, and the window takes it
+-- up once the slider is let go.
+local function draw_scale_slider()
+    section_begin('Scale')
+    local pad = indent_chrome()
+    imgui.PushStyleColor(ImGuiCol_FrameBg, rgba(HEX.well))
+    imgui.PushStyleColor(ImGuiCol_FrameBgHovered, rgba(HEX.hover))
+    imgui.PushStyleColor(ImGuiCol_FrameBgActive, rgba(HEX.hover))
+    imgui.PushStyleColor(ImGuiCol_SliderGrab, rgba(HEX.teal))
+    imgui.PushStyleColor(ImGuiCol_SliderGrabActive, rgba(HEX.accent2))
+    imgui.BeginGroup()
+    imgui.AlignTextToFramePadding()
+    imgui.TextColored(rgba(HEX.text2), 'Scale')
+    imgui.SameLine(0, S(8))
+    imgui.SetNextItemWidth(S(130))
+    local buf = { ui.scale() }
+    local flags = ImGuiSliderFlags_AlwaysClamp
+    local changed
+    if flags then
+        changed = imgui.SliderFloat('##tracker.scale', buf, SCALE_MIN, SCALE_MAX, '%.2fx', flags)
+    else
+        changed = imgui.SliderFloat('##tracker.scale', buf, SCALE_MIN, SCALE_MAX, '%.2fx')
+    end
+    local hovered = imgui.IsItemHovered()
+    local held = imgui.IsItemActive() and true or false
+    imgui.EndGroup()
+    imgui.PopStyleColor(5)
+    local x1 = select(1, imgui.GetItemRectMin())
+    local x2 = select(1, imgui.GetItemRectMax())
+    mark_width((x2 - x1) + pad)
+    section_end()
+    if changed then
+        ui.set_scale(buf[1])
+    end
+    if panel.scale_held and not held then
+        settingslib.save()
+    end
+    panel.scale_held = held
+    if hovered and not held then
+        show_tooltip('Window size. Taken up once the slider is let go.')
+    end
+end
+
+local function draw_header()
+    local pad = indent_chrome()
+    local h = S(18)
+    local x, y = imgui.GetCursorScreenPos()
+    imgui.Dummy({ 0, h })
+    local dl = imgui.GetWindowDrawList()
+    local cy = y + h / 2
+    local title_font = face('semi')
+    text_mid(dl, x, cy, 'Tracker', HEX.white, title_font, BODY, panel.chrome)
+    local title_w = measure('Tracker', title_font, BODY)
+
+    local box = S(14) * 1.5
+    local gap = S(4)
+    local content_left = x - pad
+    -- Title, a gap, the cog, a gap, the close mark, then S(6) before the content edge.
+    local min_span = pad + title_w + S(10) + box + gap + box + S(6)
+    local span = math.max(panel.fit_w or 0, min_span)
+    local right = content_left + span
+    local close_cx = right - S(6) - box / 2
+    local cog_cx = close_cx - gap - box
+
+    local function hit(id, cx)
+        local rx, ry = imgui.GetCursorScreenPos()
+        imgui.SetCursorScreenPos({ cx - box / 2, cy - box / 2 })
+        imgui.InvisibleButton(id, { box, box })
+        local hovered = imgui.IsItemHovered()
+        local clicked = imgui.IsItemClicked(0)
+        imgui.SetCursorScreenPos({ rx, ry })
+        return hovered, clicked
+    end
+
+    local cog_hover, cog_click = hit('##tracker.cog', cog_cx)
+    if cog_click then
+        ui.scale_open = not ui.scale_open
+    end
+    local cog_color = (cog_hover or ui.scale_open) and HEX.teal or HEX.dim
+    glyph(dl, 'cog', cog_cx, cy, cog_color, 1.1, panel.chrome)
+    if cog_hover then
+        show_tooltip('Scale')
+    end
+
+    local close_hover, close_click = hit('##tracker.close', close_cx)
+    if close_click then
+        ui.show[1] = false
+        ui.scale_open = false
+    end
+    local close_color = close_hover and HEX.rose or HEX.dim
+    glyph(dl, 'close', close_cx, cy, close_color, 1.5, panel.chrome)
+    -- Mark what the header needs, not where the close mark landed. The close
+    -- mark follows fit_w, so its spot would hold a too-wide frame for frames.
+    mark_width(min_span - S(6))
+
+    if ui.scale_open then
+        draw_scale_slider()
+    end
+
+    local rule_y = select(2, imgui.GetCursorScreenPos())
+    local rule_w = math.max(panel.fit_w or 0, close_cx + box / 2 - content_left)
+    dl:AddLine({ content_left, rule_y }, { content_left + rule_w, rule_y }, u32(HEX.border, panel.chrome), 1)
+    imgui.Dummy({ 0, S(2) })
+end
+
+local function section_gap()
+    imgui.Dummy({ 0, S(SECTION_GAP) })
+end
+
+local function begin_layers(dl)
+    panel.plates = {}
+    panel.layered = false
+    panel.section_mark = nil
+    panel.section_key = nil
+    if dl == nil or dl.ChannelsSplit == nil then
+        return
+    end
+    local ok = pcall(function()
+        dl:ChannelsSplit(3)
+        dl:ChannelsSetCurrent(2)
+    end)
+    panel.layered = ok and true or false
 end
 
 -- Drawn on the back channel so row wells and labels stay above it.
@@ -1337,6 +1457,9 @@ function ui.render()
     end
 
     dailies.begin_frame()
+    if not panel.scale_held then
+        user_scale = ui.scale()
+    end
     update_scale()
     tick()
     -- Last frame's hover drives this frame, because the window background is
