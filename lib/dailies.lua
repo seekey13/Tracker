@@ -18,6 +18,8 @@ dailies.pala_order = P.PALALUMIN_ORDER
 
 local cfg
 local recent_trade = false
+-- The button sends to Palalumin whatever the player has targeted.
+local button_trade = false
 local counts = nil
 local item_ids = {}
 
@@ -90,7 +92,9 @@ local function lookup_item_id(item_name)
     return nil
 end
 
--- Inventory only (container 0). Nil when the client cannot answer yet.
+-- Inventory only (container 0), locked stacks included. Slot 0 is gil, so
+-- the count runs from slot 1, as a trade does. Nil when the client cannot
+-- answer yet.
 function dailies.item_count(item_name)
     if type(item_name) ~= 'string' or item_name == '' then
         return nil
@@ -113,8 +117,15 @@ function dailies.item_count(item_name)
     if not inventory then
         return nil
     end
+    local last = 80
+    local sized, limit = pcall(function()
+        return inventory:GetContainerCountMax(0)
+    end)
+    if sized and type(limit) == 'number' and limit > 0 then
+        last = limit
+    end
     local total = 0
-    for i = 0, 79 do
+    for i = 1, last do
         local ok, count = pcall(function()
             local entry = inventory:GetContainerItem(0, i)
             if entry == nil or entry.Id ~= item_id then
@@ -204,7 +215,7 @@ local function apply_system(event)
                 row.completed = true
                 save()
             end
-        elseif name == 'Palalumin' then
+        elseif name == 'Palalumin' or button_trade then
             local defeat = cfg.palalumin_quests['Defeat mobs']
             if defeat and not defeat.completed and defeat.killed and defeat.total and defeat.killed >= defeat.total then
                 defeat.completed = true
@@ -219,6 +230,7 @@ local function apply_system(event)
             end
         end
         recent_trade = false
+        button_trade = false
         return
     end
     if event.kind == 'dice' then
@@ -371,7 +383,8 @@ function dailies.pala_line(name, row)
     return pala_status(name, row)
 end
 
--- nil hides the button. 'ready' can be clicked. 'wait' is the gray one.
+-- nil hides the button. 'ready' can be clicked. 'wait' and 'blocked' are
+-- gray, and 'blocked' also returns why the owned items cannot go.
 function dailies.trade_button(items)
     return trade.button(items)
 end
@@ -388,10 +401,12 @@ function dailies.trade_start(items)
 end
 
 -- One attempt per frame. A sent turn-in arms the same completion flag a
--- hand-traded 0x036 does, so "Quest Completed" can close the item row.
+-- hand-traded 0x036 does, so "Quest Completed" can close the item row. A
+-- click does not target Palalumin, so that line counts with anything targeted.
 function dailies.trade_update()
     if trade.update() then
         recent_trade = true
+        button_trade = true
     end
 end
 

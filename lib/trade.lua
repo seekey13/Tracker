@@ -13,7 +13,10 @@ local P = require('lib.daily_parse')
 local trade = {}
 
 local NPC_NAME = 'Palalumin'
+-- Where Palalumin stands in Hu'Xzoi: X and Y as mobdb shows them.
+local NPC_X, NPC_Y = -8.61, -357.43
 local TRADE_RANGE = 9 -- GetDistance is squared yalms; 3 yalms
+local SEARCH_EVERY = 1 -- seconds between walks of every entity
 local MAX_ENTRIES = 8 -- one trade window
 local COOLDOWN = 3
 
@@ -21,6 +24,12 @@ local COOLDOWN = 3
 -- entries are the slots and counts chosen at the click.
 local run = nil
 local last_sent = nil
+-- Palalumin's index from the last walk, and when that walk ran.
+local known_index = nil
+local searched_at = nil
+-- Item ids by name. The button asks every frame, and a name search walks the
+-- whole item table.
+local item_ids = {}
 
 local function zone_id()
     local ok, zone = pcall(function()
@@ -49,10 +58,31 @@ local function clean_name(name)
     return (name:gsub('%z.*', ''):gsub('%s+$', ''))
 end
 
--- Index and server id of Palalumin when this character is in Hu'Xzoi and
--- within 3 yalms. Anywhere else, including the other Lumoria zones, is nil.
-local function find_npc()
+-- True in Hu'Xzoi within 3 yalms of Palalumin's spot. Nothing looks for him
+-- anywhere else, including the other Lumoria zones.
+local function at_spot()
     if zone_id() ~= P.ZONE_HUXZOI then
+        return false
+    end
+    local ok, x, y = pcall(function()
+        local mm = AshitaCore:GetMemoryManager()
+        local me = mm:GetParty():GetMemberTargetIndex(0)
+        local entity = mm:GetEntity()
+        return entity:GetLocalPositionX(me), entity:GetLocalPositionY(me)
+    end)
+    if not ok or type(x) ~= 'number' or type(y) ~= 'number' then
+        return false
+    end
+    local dx, dy = x - NPC_X, y - NPC_Y
+    return dx * dx + dy * dy <= TRADE_RANGE
+end
+
+-- Index and server id of Palalumin when this character stands at his spot
+-- and he is within 3 yalms. The index the last walk found is checked each
+-- frame. A walk of every entity runs only when that index is no longer him,
+-- and at most once a second.
+local function find_npc()
+    if not at_spot() then
         return nil
     end
     local found_i, found_id
@@ -61,19 +91,41 @@ local function find_npc()
         if entity == nil or entity.GetName == nil then
             return
         end
-        for i = 0, 0x8FF do
-            if clean_name(entity:GetName(i)) == NPC_NAME then
-                local sid = entity:GetServerId(i)
-                local flags = entity:GetRenderFlags0(i)
-                local dist = entity:GetDistance(i)
-                if sid ~= nil and sid ~= 0
-                    and type(flags) == 'number' and bit.band(flags, 0x200) ~= 0
-                    and type(dist) == 'number' and dist <= TRADE_RANGE then
-                    found_i = i
-                    found_id = sid
-                    return
+        -- The server id when index i is a rendered Palalumin, else nil.
+        local function live(i)
+            if clean_name(entity:GetName(i)) ~= NPC_NAME then
+                return nil
+            end
+            local sid = entity:GetServerId(i)
+            local flags = entity:GetRenderFlags0(i)
+            if sid == nil or sid == 0 or type(flags) ~= 'number' or bit.band(flags, 0x200) == 0 then
+                return nil
+            end
+            return sid
+        end
+        local sid = known_index and live(known_index)
+        if not sid then
+            local now = os.clock()
+            if searched_at ~= nil and now - searched_at < SEARCH_EVERY then
+                return
+            end
+            searched_at = now
+            known_index = nil
+            for i = 0, 0x8FF do
+                sid = live(i)
+                if sid then
+                    known_index = i
+                    break
                 end
             end
+            if not sid then
+                return
+            end
+        end
+        local dist = entity:GetDistance(known_index)
+        if type(dist) == 'number' and dist <= TRADE_RANGE then
+            found_i = known_index
+            found_id = sid
         end
     end)
     if not ok then
@@ -83,6 +135,9 @@ local function find_npc()
 end
 
 local function lookup_id(item_name)
+    if item_ids[item_name] then
+        return item_ids[item_name]
+    end
     local ok, resources = pcall(function()
         return AshitaCore:GetResourceManager()
     end)
@@ -98,6 +153,7 @@ local function lookup_id(item_name)
             return item.Id
         end)
         if found and type(id) == 'number' and id > 0 then
+            item_ids[item_name] = id
             return id
         end
     end
@@ -146,7 +202,9 @@ local function inventory()
 end
 
 -- Slots that add up to each requested count and no more. Locked stacks are
--- left alone. More than one trade window is nil: this path never splits.
+-- left alone, and this path never splits a trade. When the items are owned
+-- but cannot go, the second value says why: 'locked' when locked stacks make
+-- up the rest, 'stacks' when they fill more than one trade window.
 local function pick(needs)
     local wanted = resolve(needs)
     if not wanted then
@@ -163,22 +221,22 @@ local function pick(needs)
     if counted and type(limit) == 'number' then
         max_slot = limit
     end
-    local remaining = {}
+    local remaining, locked = {}, {}
     for i, row in ipairs(wanted) do
         remaining[i] = row.count
+        locked[i] = 0
     end
     local entries = {}
     for slot = 1, max_slot do
         local read_ok, item = pcall(inv.GetContainerItem, inv, 0, slot)
-        if read_ok and item and item.Flags == 0 and item.Id ~= nil and item.Id ~= 0 then
+        if read_ok and item and item.Id ~= nil and item.Id ~= 0 then
             for i, row in ipairs(wanted) do
-                if item.Id == row.id and remaining[i] > 0 then
+                if item.Id == row.id then
                     local have = tonumber(item.Count) or 0
-                    local take = math.min(have, remaining[i])
-                    if take > 0 then
-                        if #entries >= MAX_ENTRIES then
-                            return nil
-                        end
+                    if item.Flags ~= 0 then
+                        locked[i] = locked[i] + have
+                    elseif remaining[i] > 0 and have > 0 then
+                        local take = math.min(have, remaining[i])
                         entries[#entries + 1] = { slot = slot, id = row.id, count = take }
                         remaining[i] = remaining[i] - take
                     end
@@ -187,10 +245,18 @@ local function pick(needs)
             end
         end
     end
-    for _, left in ipairs(remaining) do
-        if left > 0 then
+    local short = false
+    for i, left in ipairs(remaining) do
+        if left > locked[i] then
             return nil
         end
+        short = short or left > 0
+    end
+    if short then
+        return nil, 'locked'
+    end
+    if #entries > MAX_ENTRIES then
+        return nil, 'stacks'
     end
     if #entries == 0 then
         return nil
@@ -269,6 +335,7 @@ local function cooling_down(now)
 end
 
 --- nil when the button stays off the row. 'ready' or 'wait' when it is shown.
+--- 'blocked' is gray too, and pick's reason comes with it.
 function trade.button(needs)
     if run ~= nil then
         return 'wait'
@@ -276,7 +343,11 @@ function trade.button(needs)
     if not find_npc() then
         return nil
     end
-    if not pick(needs) then
+    local entries, why = pick(needs)
+    if not entries then
+        if why then
+            return 'blocked', why
+        end
         return nil
     end
     if cooling_down(os.clock()) then

@@ -994,6 +994,11 @@ end
 local SEA = 'https://discord.com/channels/696847769444548700/1359317001457242192'
 
 local TRADE_LABEL = 'Trade'
+-- Hover text on the gray button when the items are owned but cannot go.
+local TRADE_BLOCKED = {
+    locked = 'Some of these are locked, in your bazaar or equipped.',
+    stacks = 'These take more than 8 stacks. Combine them first.',
+}
 
 local function trade_button_size()
     local tw, th = imgui.CalcTextSize(TRADE_LABEL)
@@ -1009,13 +1014,14 @@ local function trade_button_size()
 end
 
 -- The hit target is invisible. The face drawn over it is the button, so a
--- pending turn-in can go gray without a second widget.
-local function draw_trade_button(state)
+-- pending or blocked turn-in can go gray without a second widget.
+local function draw_trade_button(state, why)
     local w, h, pad_x, th = trade_button_size()
     pcall(imgui.AlignTextToFramePadding)
     imgui.InvisibleButton('##pala.trade', { w, h })
     local ready = state == 'ready'
-    local hot = ready and imgui.IsItemHovered()
+    local hovered = imgui.IsItemHovered()
+    local hot = ready and hovered
     local clicked = imgui.IsItemClicked(0)
     local x1, y1 = imgui.GetItemRectMin()
     local _, y2 = imgui.GetItemRectMax()
@@ -1033,6 +1039,8 @@ local function draw_trade_button(state)
     dl:AddText({ x1 + pad_x, (y1 + y2) / 2 - th / 2 }, u32(fg), TRADE_LABEL)
     if hot then
         show_tooltip('Trade these items to Palalumin')
+    elseif hovered and state == 'blocked' then
+        show_tooltip(TRADE_BLOCKED[why])
     end
     return ready and clicked and true or false
 end
@@ -1166,10 +1174,10 @@ local function draw_palalumin(saved)
                     end
                     imgui.SameLine()
                     imgui.TextColored(summary_label, ' ')
-                    local offer = dailies.trade_button(items)
+                    local offer, why = dailies.trade_button(items)
                     if offer then
                         place_after(S(12), trade_button_size())
-                        if draw_trade_button(offer) then
+                        if draw_trade_button(offer, why) then
                             dailies.trade_start(items)
                         end
                     end
@@ -1486,6 +1494,9 @@ function ui.render()
         if font_pushed and not DYNAMIC then
             scales, window_scale = {}, scale_for(BODY)
             imgui.SetWindowFontScale(window_scale)
+        elseif not DYNAMIC then
+            -- No Segoe: the stock face at its own size, times the slider.
+            imgui.SetWindowFontScale(user_scale)
         end
         local place_x, place_y = imgui.GetWindowPos()
         register_layout(place_x, place_y)

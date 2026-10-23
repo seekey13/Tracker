@@ -6,6 +6,9 @@ Run: luajit tests\run.lua
 
 local source = (arg and arg[0]) or ''
 local root = source:match('^(.*)[\\/]tests[\\/]run%.lua$')
+if root == nil and source:match('^tests[\\/]run%.lua$') then
+    root = '.'
+end
 if root == nil or root == '' then
     root = 'R:\\CatsEyeXI\\catseyexi-client\\Vanacore\\addons\\ashita\\Tracker'
 end
@@ -1214,6 +1217,22 @@ eq(tip_face and tip_face[2], scaled(14) / 18, 'before 1.92 the tooltip window fo
 eq(window_scales.tooltip, 1, 'the shared tooltip window goes back to scale 1')
 eq(faces['Secret chest at '][2], body_scale, 'a tooltip leaves the panel on its body scale')
 
+-- Without segoeui.ttf nothing is baked, so the stock face takes the slider.
+package.loaded['lib.ui'] = nil
+IMGUI_VERSION_NUM = 18000
+local bare_ui = require('lib.ui')
+IMGUI_VERSION_NUM = 19223
+package.loaded['lib.ui'] = ui
+bare_ui._layout_set = true
+bare_ui.show[1] = true
+render(bare_ui)
+eq(window_scales.main, 1, 'without Segoe before 1.92 the stock face is at 1x')
+cfg.scale = 2
+render(bare_ui)
+eq(window_scales.main, 2, 'without Segoe before 1.92 the slider scales the stock face')
+eq(sized_pushes(), 0, 'without Segoe before 1.92 no face is pushed with a size')
+cfg.scale = 1
+
 -- Stock Ashita's ImGui binds no draw-list channels.
 local channels_split = draw_list.ChannelsSplit
 draw_list.ChannelsSplit = nil
@@ -1341,11 +1360,15 @@ local slots = {
     [4] = { Id = 1001, Count = 12, Flags = 1 },
 }
 local max_slot = 80
+-- Palalumin's spot, as mobdb shows it. The player starts on it.
+local SPOT_X, SPOT_Y = -8.61, -357.43
 local actors = {
-    [10] = { name = 'Player', id = 1, flags = 0, dist = 0, status = 0 },
-    [1794] = { name = 'Palalumin', id = 16918530, flags = 0x200, dist = 0.25, status = 0 },
+    [10] = { name = 'Player', id = 1, flags = 0, dist = 0, status = 0, x = SPOT_X, y = SPOT_Y },
+    [1794] = { name = 'Palalumin', id = 16918530, flags = 0x200, dist = 0.25, status = 0, x = SPOT_X, y = SPOT_Y },
 }
 local captured = {}
+-- Entity names read. A walk of every entity reads 0x900 of them.
+local reads = 0
 local names = {
     [1001] = 'Phuabo Organ',
     [1002] = 'Xzomit Organ',
@@ -1383,8 +1406,17 @@ AshitaCore.GetMemoryManager = function()
         GetEntity = function()
             return {
                 GetName = function(_, index)
+                    reads = reads + 1
                     local actor = actors[index]
                     return actor and actor.name or ''
+                end,
+                GetLocalPositionX = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.x or 0
+                end,
+                GetLocalPositionY = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.y or 0
                 end,
                 GetServerId = function(_, index)
                     local actor = actors[index]
@@ -1457,16 +1489,22 @@ eq(offer(), nil, 'past 3 yalms hides the button')
 npc.dist = 36
 eq(offer(), nil, '6 yalms is not close enough')
 npc.dist = 0.25
+-- Each case below waits out the one-second search, so it is the case and not
+-- the wait that hides the button.
 npc.flags = 0
+clock = clock + 1
 eq(offer(), nil, 'an unrendered Palalumin is ignored')
 npc.flags = 0x200
 npc.id = 0
+clock = clock + 1
 eq(offer(), nil, 'a Palalumin with no id is ignored')
 npc.id = 16918530
 local saved_name = npc.name
 npc.name = 'Not Palalumin'
+clock = clock + 1
 eq(offer(), nil, 'a different npc is ignored')
 npc.name = saved_name
+clock = clock + 1
 world.zone = 33
 eq(offer(), nil, 'AlTaieu hides the button')
 world.zone = 35
@@ -1476,12 +1514,65 @@ eq(offer(), nil, 'Jeuno hides the button')
 world.zone = 34
 eq(offer(), 'ready', 'back in HuXzoi the button returns')
 
+-- Palalumin is only looked for from his spot. Once found, his index is read
+-- each frame, and a walk of every entity runs at most once a second.
+local player = actors[10]
+reads = 0
+offer()
+offer()
+offer()
+eq(reads, 3, 'a found Palalumin is read at his index, not searched for')
+player.x = SPOT_X + 3.01
+reads = 0
+clock = clock + 1
+eq(offer(), nil, 'past 3 yalms east of his spot hides the button')
+eq(reads, 0, 'away from his spot nothing is read')
+player.x = SPOT_X
+player.y = SPOT_Y - 3.01
+eq(offer(), nil, 'past 3 yalms south of his spot hides the button')
+eq(reads, 0, 'south of his spot nothing is read')
+player.x, player.y = SPOT_X + 2.1, SPOT_Y + 2.1
+eq(offer(), 'ready', 'within 3 yalms of his spot can trade')
+player.x, player.y = SPOT_X, SPOT_Y
+npc.name = 'Not Palalumin'
+reads = 0
+eq(offer(), nil, 'a lost Palalumin hides the button')
+truthy(reads >= 0x900, 'a lost Palalumin is searched for')
+reads = 0
+offer()
+clock = clock + 0.5
+offer()
+clock = clock + 0.25
+offer()
+eq(reads, 0, 'the next search waits a second')
+clock = clock + 0.25
+offer()
+truthy(reads >= 0x900, 'a second later it searches again')
+npc.name = saved_name
+clock = clock + 1
+eq(offer(), 'ready', 'a found Palalumin can trade again')
+
+-- Owned items that cannot go gray the button, and it says why.
 local held = slots[1]
 slots[1] = { Id = 1001, Count = 12, Flags = 1 }
-eq(offer(), nil, 'locked stacks are not tradable')
+eq(offer(), 'blocked', 'locked stacks gray the button')
+eq(select(2, offer()), 'locked', 'locked stacks are the reason')
+eq(dailies.trade_start(needs), false, 'a locked stack is not traded')
+local spare = slots[4]
+slots[4] = nil
+slots[1] = { Id = 1001, Count = 5, Flags = 1 }
+eq(offer(), nil, 'too few items, locked or not, hide the button')
 slots[1] = { Id = 1001, Count = 4, Flags = 0 }
 eq(offer(), nil, 'slot 0 is not a trade slot')
+slots[4] = spare
 slots[1] = held
+
+-- The row counts what is owned: locked stacks, and slots 1 to the last.
+slots[80] = { Id = 1003, Count = 2, Flags = 0 }
+dailies.begin_frame()
+eq(dailies.item_count('Phuabo Organ'), 24, 'the row skips the gil slot and counts locked stacks')
+eq(dailies.item_count('Yovra Organ'), 11, 'the row counts the last inventory slot')
+slots[80] = nil
 
 local function check_turnin(packet, why)
     eq(packet.id, 0x36, why .. ' id')
@@ -1550,7 +1641,11 @@ truthy(dailies.trade_start(needs), 'queue a stack that then changes')
 slots[1].Count = 3
 dailies.trade_update()
 eq(#captured, 2, 'a short stack is not traded')
+eq(offer(), 'blocked', 'a locked stack that covers the shortfall grays the button')
+local spare_lock = slots[4]
+slots[4] = nil
 eq(offer(), nil, 'the button hides once the items are short')
+slots[4] = spare_lock
 slots[1].Count = saved_count
 
 local original_slots = {
@@ -1589,8 +1684,17 @@ AshitaCore.GetMemoryManager = function()
         GetEntity = function()
             return {
                 GetName = function(_, index)
+                    reads = reads + 1
                     local actor = actors[index]
                     return actor and actor.name or ''
+                end,
+                GetLocalPositionX = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.x or 0
+                end,
+                GetLocalPositionY = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.y or 0
                 end,
                 GetServerId = function(_, index)
                     local actor = actors[index]
@@ -1618,7 +1722,9 @@ holder.slots = {}
 for slot = 1, 9 do
     holder.slots[slot] = { Id = 1001, Count = 1, Flags = 0 }
 end
-eq(dailies.trade_button({ { name = 'Phuabo Organ', needed = 9 } }), nil, 'nine stacks do not fit one trade')
+local nine_state, nine_why = dailies.trade_button({ { name = 'Phuabo Organ', needed = 9 } })
+eq(nine_state, 'blocked', 'nine stacks gray the button')
+eq(nine_why, 'stacks', 'nine stacks do not fit one trade')
 eq(dailies.trade_start({ { name = 'Phuabo Organ', needed = 9 } }), false, 'nine stacks are not sent')
 eq(#captured, 2, 'a refused trade sends nothing')
 holder.max_slot = 8
@@ -1654,7 +1760,7 @@ npc.id = 16918530
 actors[10].status = 0
 
 render()
-truthy(has_drawn('Trade'), 'the row shows Trade]')
+truthy(has_drawn('Trade'), 'the row shows Trade')
 eq(world.trade_color, rgba_u32('#FFFFFF'), 'the trade button is lit')
 local trade_i = button_at('##pala.trade')
 local pala_header = button_at('##fold.Palalumin Quests')
@@ -1676,6 +1782,21 @@ eq(button_at('##pala.trade'), nil, 'the button is not drawn out of range')
 npc.dist = 0.25
 render()
 eq(world.trade_color, rgba_u32('#FFFFFF'), 'the button returns in range')
+
+local spare_xzomit = holder.slots[2]
+holder.slots[2] = { Id = 1002, Count = 5, Flags = 19 }
+world.hover_items = true
+render()
+world.hover_items = false
+eq(world.trade_color, rgba_u32('#7B8095'), 'a locked stack grays the trade button')
+local locked_tip = false
+for _, tip in ipairs(tips) do
+    if tip == 'Some of these are locked, in your bazaar or equipped.' then
+        locked_tip = true
+    end
+end
+truthy(locked_tip, 'the gray button says the stack is locked')
+holder.slots[2] = spare_xzomit
 
 cfg.palalumin_quests['Item request'].completed = true
 eq(dailies.trade_start(needs), false, 'a finished request is not traded')
@@ -1709,6 +1830,19 @@ dailies.trade_update()
 eq(cfg.palalumin_quests['Item request'].completed, nil, 'sending does not finish the quest by itself')
 text_in('Quest Completed', 121)
 eq(cfg.palalumin_quests['Item request'].completed, true, 'the issued trade completes the item request')
+
+-- A click does not target Palalumin, and his line still closes the row.
+world.target = nil
+clock = clock + 3
+dailies.trade_update()
+cfg.palalumin_quests['Item request'].completed = nil
+truthy(dailies.trade_start(needs), 'queue a turn-in with nothing targeted')
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, true, 'a button turn-in completes the request with nothing targeted')
+cfg.palalumin_quests['Item request'].completed = nil
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'the next line with nothing targeted leaves the request open')
 
 AshitaCore.GetMemoryManager = old_memory
 AshitaCore.GetResourceManager = old_resources
