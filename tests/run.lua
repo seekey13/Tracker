@@ -183,6 +183,20 @@ local slider_mode = 'idle'
 local slider_id = nil
 local click_id = nil
 
+-- Fonts the way ImGui keeps them: one stack, and a font scale per window.
+-- Every addon shares the tooltip window.
+local font_stack, font_calls, faces = {}, {}, {}
+local window_scales, in_window, scale_calls, stray_scale = {}, false, 0, 0
+
+local function window_key()
+    return tooltip_depth > 0 and 'tooltip' or 'main'
+end
+
+local function face_now()
+    local top = font_stack[#font_stack]
+    return { top and top.font, window_scales[window_key()] or 1 }
+end
+
 local draw_list = {
     AddLine = function() end,
     AddRect = function() end,
@@ -203,6 +217,7 @@ local draw_list = {
         end
         if type(str) == 'string' and #str > 1 then
             drawn[#drawn + 1] = str
+            faces[str] = face_now()
         end
     end,
 }
@@ -231,10 +246,12 @@ local imgui = {
     TextColored = function(_, text)
         texts[#texts + 1] = text
         sequence[#sequence + 1] = { 'text', text }
+        faces[text] = face_now()
     end,
     TextUnformatted = function(text)
         if tooltip_depth > 0 then
             tips[#tips + 1] = text
+            faces[text] = face_now()
         end
     end,
     InvisibleButton = function(id)
@@ -276,8 +293,20 @@ local imgui = {
     PopStyleColor = function() end,
     PushStyleVar = function() end,
     PopStyleVar = function() end,
-    PushFont = function() end,
-    PopFont = function() end,
+    PushFont = function(font, size)
+        font_stack[#font_stack + 1] = { font = font, size = size }
+        font_calls[#font_calls + 1] = { font, size }
+    end,
+    PopFont = function()
+        table.remove(font_stack)
+    end,
+    SetWindowFontScale = function(s)
+        scale_calls = scale_calls + 1
+        if not in_window and tooltip_depth == 0 then
+            stray_scale = stray_scale + 1
+        end
+        window_scales[window_key()] = s
+    end,
     -- Stock Ashita's ImGui 1.80 BeginTooltip returns nothing.
     BeginTooltip = function()
         tooltip_depth = tooltip_depth + 1
@@ -298,17 +327,20 @@ local imgui = {
     end,
     Begin = function()
         began = began + 1
+        in_window = true
         return true
     end,
-    End = function() end,
+    End = function()
+        in_window = false
+    end,
     GetWindowPos = function()
         return 99, 99
     end,
     GetWindowSize = function()
         return 220, 180
     end,
-    AddFontFromFileTTF = function()
-        return {}
+    AddFontFromFileTTF = function(path, size)
+        return { file = path, size = size }
     end,
 }
 
@@ -656,6 +688,7 @@ local dailies = require('lib.dailies')
 local regime = require('lib.regime')
 local ui = require('lib.ui')
 require('lib.packets')
+handlers.load()
 
 eq(addon.name, 'Tracker', 'addon name')
 eq(addon.author, 'Seekey', 'addon author')
@@ -869,7 +902,7 @@ vana = {
     paths = { install = layout_root },
 }
 
-local function render()
+local function render(target)
     buttons, texts, drawn = {}, {}, {}
     style_colors, dummies, rects = {}, {}, {}
     title_alpha = nil
@@ -877,7 +910,8 @@ local function render()
     world.trade_color = nil
     tips, tooltip_depth = {}, 0
     sequence = {}
-    local ok, err = xpcall(ui.render, debug.traceback)
+    font_calls, faces, scale_calls, stray_scale = {}, {}, 0, 0
+    local ok, err = xpcall((target or ui).render, debug.traceback)
     if not ok then
         fail('render\n' .. tostring(err))
     end
@@ -886,6 +920,20 @@ end
 local function scaled(n)
     local s = math.max(0.75, math.min(1.6, 1440 / 1440)) * 1.1
     return math.floor(n * s + 0.5)
+end
+
+local function is_face(font, file)
+    return type(font) == 'table' and tostring(font.file):lower():sub(-#file - 1) == '\\' .. file
+end
+
+local function sized_pushes()
+    local n = 0
+    for _, call in ipairs(font_calls) do
+        if call[2] ~= nil then
+            n = n + 1
+        end
+    end
+    return n
 end
 
 local function count_gaps()
@@ -1010,6 +1058,11 @@ eq(count_gaps(), 2, 'a gap sits between each section')
 eq(style_colors[3][4], 0, 'the frame starts clear')
 eq(title_alpha, 0, 'the title starts clear')
 truthy(has_solid_fill(), 'section wells stay solid while the frame is clear')
+truthy(is_face(faces['Secret chest at '][1], 'segoeui.ttf'), 'row text is Segoe UI')
+truthy(is_face(faces['Tracker'][1], 'seguisb.ttf'), 'the title is Segoe UI Semibold')
+truthy(#font_calls > 0 and sized_pushes() == #font_calls, '1.92 pushes every face with its size')
+eq(scale_calls, 0, '1.92 leaves the window font scale alone')
+eq(#font_stack, 0, 'every font push is popped')
 
 local clock = os.clock() + 5
 os.clock = function()
@@ -1055,6 +1108,37 @@ for _, tip in ipairs(tips) do
 end
 truthy(zone_tip, 'a hovered link shows its tooltip')
 world.hover_items = false
+
+-- ImGui before 1.92 draws a face only at its bake size, so the window font
+-- scale sizes it. This is how Chains draws Segoe there.
+package.loaded['lib.ui'] = nil
+IMGUI_VERSION_NUM = 18000
+local old_ui = require('lib.ui')
+IMGUI_VERSION_NUM = 19223
+package.loaded['lib.ui'] = ui
+old_ui._layout_set = true
+old_ui.bake()
+old_ui.show[1] = true
+render(old_ui)
+render(old_ui)
+local body_scale = scaled(16) / 18
+truthy(is_face(faces['Secret chest at '][1], 'segoeui.ttf'), 'before 1.92 row text is Segoe UI')
+eq(faces['Secret chest at '][2], body_scale, 'before 1.92 the window font scale sizes row text')
+truthy(is_face(faces['Tracker'][1], 'seguisb.ttf'), 'before 1.92 the title is Segoe UI Semibold')
+eq(faces['Tracker'][2], body_scale, 'before 1.92 the title is sized by the window font scale')
+truthy(#font_calls > 0, 'before 1.92 faces are pushed')
+eq(sized_pushes(), 0, 'before 1.92 a face goes on without a size')
+eq(stray_scale, 0, 'before 1.92 the font scale is only set inside a window')
+eq(#font_stack, 0, 'before 1.92 every font push is popped')
+eq(window_scales.main, body_scale, 'before 1.92 the panel ends on its body scale')
+world.hover_items = true
+render(old_ui)
+world.hover_items = false
+local tip_face = faces['Open FFXI Wiki: Garlaige Citadel']
+truthy(tip_face and is_face(tip_face[1], 'segoeui.ttf'), 'before 1.92 a tooltip is Segoe UI')
+eq(tip_face and tip_face[2], scaled(14) / 18, 'before 1.92 the tooltip window font scale sizes it')
+eq(window_scales.tooltip, 1, 'the shared tooltip window goes back to scale 1')
+eq(faces['Secret chest at '][2], body_scale, 'a tooltip leaves the panel on its body scale')
 
 -- Stock Ashita's ImGui binds no draw-list channels.
 local channels_split = draw_list.ChannelsSplit

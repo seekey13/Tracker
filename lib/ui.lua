@@ -82,30 +82,19 @@ end
 
 local BODY, SMALL = 16, 13.5
 local DYNAMIC = (tonumber(IMGUI_VERSION_NUM) or 0) >= 19200
+-- Each face is baked at this size. ImGui before 1.92 draws a face only at
+-- its bake size, so there the window font scale makes up the rest.
+local BAKE_PX = 18
 local fonts = { tried = false, ready = false }
-local fonts_pending = nil
 local measured, measured_scale, measured_n = {}, nil, 0
 
-local function fonts_begin()
-    if fonts_pending then
-        fonts.text = fonts_pending.text
-        fonts.semi = fonts_pending.semi
-        fonts.bold_italic = fonts_pending.bold_italic
-        fonts.semi_italic = fonts_pending.semi_italic
-        fonts_pending = nil
-        fonts.ready = true
-        measured, measured_n = {}, 0
-    end
+-- Segoe UI from Windows, once, from the load event. Adding to the shared
+-- atlas mid-frame can crash. Without segoeui.ttf, ready stays false.
+function ui.bake()
     if fonts.tried then
         return
     end
     fonts.tried = true
-    if not DYNAMIC then
-        local face_now = imgui.GetFont()
-        fonts.text, fonts.semi, fonts.bold_italic, fonts.semi_italic = face_now, face_now, face_now, face_now
-        fonts.ready = true
-        return
-    end
     local dir = ((os.getenv and os.getenv('WINDIR')) or 'C:\\Windows') .. '\\Fonts\\'
     local function add(file, fallback)
         local path = dir .. file
@@ -114,20 +103,72 @@ local function fonts_begin()
             return fallback
         end
         handle:close()
-        local ok, face_now = pcall(imgui.AddFontFromFileTTF, path, 18)
+        local ok, face_now = pcall(imgui.AddFontFromFileTTF, path, BAKE_PX)
         if ok and face_now then
             return face_now
         end
         return fallback
     end
-    local text = add('segoeui.ttf', imgui.GetFont())
+    local text = add('segoeui.ttf')
+    if text == nil then
+        return
+    end
     local semi = add('seguisb.ttf', text)
-    fonts_pending = {
-        text = text,
-        semi = semi,
-        bold_italic = add('segoeuiz.ttf', semi),
-        semi_italic = add('seguisbi.ttf', semi),
-    }
+    fonts.text = text
+    fonts.semi = semi
+    fonts.bold_italic = add('segoeuiz.ttf', semi)
+    fonts.semi_italic = add('seguisbi.ttf', semi)
+    fonts.ready = true
+end
+
+local function face(which)
+    return fonts[which] or imgui.GetFont()
+end
+
+-- The window font scale that stands in for size before 1.92.
+local function scale_for(size)
+    return math.max(0.1, S(size) / BAKE_PX)
+end
+
+-- The window font scale each push replaced, for its pop to put back.
+local scales, window_scale = {}, 1
+
+-- Inside a window only: before 1.92 the size is that window's font scale.
+local function push_font(font, size)
+    if DYNAMIC then
+        imgui.PushFont(font, S(size))
+        return true
+    end
+    if not (fonts.ready and font) then
+        return false
+    end
+    imgui.PushFont(font)
+    scales[#scales + 1] = window_scale
+    window_scale = scale_for(size)
+    imgui.SetWindowFontScale(window_scale)
+    return true
+end
+
+local function pop_font()
+    if not DYNAMIC then
+        window_scale = table.remove(scales) or 1
+        imgui.SetWindowFontScale(window_scale)
+    end
+    imgui.PopFont()
+end
+
+-- Ahead of Begin. Before 1.92 the face goes on now, and its size waits for
+-- Begin to make the window current.
+local function push_window_font(size)
+    if DYNAMIC then
+        imgui.PushFont(face('text'), S(size))
+        return true
+    end
+    if fonts.ready then
+        imgui.PushFont(fonts.text)
+        return true
+    end
+    return false
 end
 
 local function measure(str, font, size)
@@ -138,13 +179,10 @@ local function measure(str, font, size)
     local key = tostring(font) .. '|' .. tostring(size) .. '|' .. str
     local found = measured[key]
     if not found then
-        local w, h
-        if DYNAMIC and fonts.ready and font then
-            imgui.PushFont(font, S(size))
-            w, h = imgui.CalcTextSize(str)
-            imgui.PopFont()
-        else
-            w, h = imgui.CalcTextSize(str)
+        local pushed = push_font(font, size)
+        local w, h = imgui.CalcTextSize(str)
+        if pushed then
+            pop_font()
         end
         found = { w or 0, h or 0 }
         measured[key] = found
@@ -156,15 +194,14 @@ end
 local function text_mid(dl, x, cy, str, hex, font, size, alpha)
     local _, h = measure(str, font, size)
     local y = cy - h / 2
-    if DYNAMIC and fonts.ready then
+    -- Segoe's tall ascent sets text centred by its box low.
+    if fonts.ready then
         y = y - math.floor(h * 0.06 + 0.5)
     end
-    if DYNAMIC and fonts.ready and font then
-        imgui.PushFont(font, S(size))
-        dl:AddText({ x, y }, u32(hex, alpha), str)
-        imgui.PopFont()
-    else
-        dl:AddText({ x, y }, u32(hex, alpha), str)
+    local pushed = push_font(font, size)
+    dl:AddText({ x, y }, u32(hex, alpha), str)
+    if pushed then
+        pop_font()
     end
 end
 
@@ -232,10 +269,6 @@ local function ease(id, target)
     end
     anim[id] = v
     return v
-end
-
-local function face(which)
-    return fonts[which] or imgui.GetFont()
 end
 
 local function glyph(dl, kind, cx, cy, hex, glyph_scale, alpha)
@@ -365,16 +398,21 @@ local function show_tooltip(text)
     imgui.PushStyleVar(ImGuiStyleVar_WindowRounding, S(4))
     imgui.PushStyleVar(ImGuiStyleVar_PopupRounding, S(4))
     imgui.PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1)
-    local pushed = false
-    if DYNAMIC and fonts.ready and fonts.text then
-        imgui.PushFont(fonts.text, S(SMALL + 0.5))
-        pushed = true
-    end
+    local pushed = push_window_font(SMALL + 0.5)
     -- ImGui 1.80 (stock Ashita) returns nothing here, and 1.92 always returns
     -- true. The tooltip is open either way. Skipping EndTooltip would pour the
     -- rest of the window into it.
     imgui.BeginTooltip()
+    -- Before 1.92 the size is the tooltip window's font scale. Every addon
+    -- shares that window, so the scale goes back to 1 before it closes.
+    local sized = pushed and not DYNAMIC
+    if sized then
+        imgui.SetWindowFontScale(scale_for(SMALL + 0.5))
+    end
     imgui.TextUnformatted(text)
+    if sized then
+        imgui.SetWindowFontScale(1)
+    end
     imgui.EndTooltip()
     if pushed then
         imgui.PopFont()
@@ -1304,7 +1342,6 @@ function ui.render()
     -- Last frame's hover drives this frame, because the window background is
     -- chosen before Begin. The fade uses that same value for the title.
     panel.chrome = ease('chrome', panel.hover and 1 or 0)
-    fonts_begin()
 
     imgui.SetNextWindowSizeConstraints({ 0, 0 }, { FLT_MAX, FLT_MAX })
     local win_flags = bit.bor(
@@ -1321,12 +1358,12 @@ function ui.render()
     end
 
     push_window_style()
-    local font_pushed = false
-    if DYNAMIC and fonts.ready and fonts.text then
-        imgui.PushFont(fonts.text, S(BODY))
-        font_pushed = true
-    end
+    local font_pushed = push_window_font(BODY)
     if imgui.Begin(LAYOUT_WINDOW, ui.show, win_flags) then
+        if font_pushed and not DYNAMIC then
+            scales, window_scale = {}, scale_for(BODY)
+            imgui.SetWindowFontScale(window_scale)
+        end
         local place_x, place_y = imgui.GetWindowPos()
         register_layout(place_x, place_y)
         if imgui.IsWindowHovered then

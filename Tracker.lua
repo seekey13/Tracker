@@ -236,6 +236,10 @@ local function on_command(args)
     return true
 end
 
+ashita.events.register('load', 'tracker_load', function()
+    ui.bake()
+end)
+
 ashita.events.register('text_in', 'tracker_text_in', function(e)
     if e.injected then
         return
