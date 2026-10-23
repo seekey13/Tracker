@@ -262,6 +262,11 @@ local folded = {}
 -- opaque: the header and the ground behind its rows do not take the fade.
 local panel = { chrome = 0, hover = false, layered = false, plates = {} }
 
+-- Stock Ashita's ImGui binds no draw-list channels, so a ground cannot slide
+-- under text already drawn. There each ground is painted first: its spot is
+-- the cursor now, and its size is the same piece's size last frame.
+local grounds, grounds_next = {}, {}
+
 local CHROME_PAD_X = 8
 local BAR_PAD_X = 4
 local ROW_PAD_X = 6
@@ -331,9 +336,9 @@ local function draw_section_header(text)
     local t = ease('fold.' .. text, hovered and 1 or 0)
     local dl = imgui.GetWindowDrawList()
     local span = math.max(btn_w, panel.fit_w or 0)
-    -- The section plate paints this when layers are on. This covers the
-    -- header when they are not, with the same rounded top.
-    if not panel.layered then
+    -- The section plate paints this when layers are on, or when last frame
+    -- left its size. This covers the header otherwise.
+    if not panel.layered and not (panel.section_mark and panel.section_mark.painted) then
         fill(dl, x, y, span, h, HEX.bg, S(SECTION_RADIUS), fade)
     end
     local cy = y + h / 2
@@ -365,10 +370,12 @@ local function show_tooltip(text)
         imgui.PushFont(fonts.text, S(SMALL + 0.5))
         pushed = true
     end
-    if imgui.BeginTooltip() then
-        imgui.TextUnformatted(text)
-        imgui.EndTooltip()
-    end
+    -- ImGui 1.80 (stock Ashita) returns nothing here, and 1.92 always returns
+    -- true. The tooltip is open either way. Skipping EndTooltip would pour the
+    -- rest of the window into it.
+    imgui.BeginTooltip()
+    imgui.TextUnformatted(text)
+    imgui.EndTooltip()
     if pushed then
         imgui.PopFont()
     end
@@ -377,8 +384,31 @@ local function show_tooltip(text)
 end
 
 -- flush: the meter runs to the well's right edge, so it meets the level text.
+local function paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush)
+    local radius = S(3)
+    -- Wells stay solid. The window frame's fade does not apply here.
+    fill(dl, x1, y1, well_w, row_h, HEX.well, radius, 1)
+    outline(dl, x1, y1, well_w, row_h, HEX.line, radius, 1)
+    if fraction == nil or well_w <= S(8) then
+        return
+    end
+    local mh = math.max(2, S(3))
+    local mx = x1 + S(4)
+    local mw = flush and (well_w - (mx - x1)) or (well_w - S(8))
+    local my = y1 + row_h - S(2) - mh
+    fill(dl, mx, my, mw, mh, HEX.off, mh / 2, 1)
+    local frac = math.max(0, math.min(1, fraction or 0))
+    if frac <= 0 then
+        return
+    end
+    local meter = HEX.amber
+    if bar_color == COLORS.dark_grey then
+        meter = mix(HEX.amber, HEX.off, 0.45)
+    end
+    fill(dl, mx, my, math.max(mh, mw * frac), mh, meter, mh / 2, 1)
+end
+
 local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing, flush)
-    local has_meter = fraction ~= nil
     local pad_y = S(1)
     local dl = imgui.GetWindowDrawList()
     -- outer: the window already split channels, so the well goes on the back
@@ -396,6 +426,16 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
             if split then
                 layer = 'inner'
             end
+        end
+    end
+    local ground_key = nil
+    if layer == nil then
+        panel.section_row = (panel.section_row or 0) + 1
+        ground_key = 'well.' .. tostring(panel.section_key) .. '.' .. panel.section_row
+        local size = grounds[ground_key]
+        if size then
+            local gx, gy = imgui.GetCursorScreenPos()
+            paint_well(dl, gx, gy, size[1], size[2], fraction, bar_color, flush)
         end
     end
 
@@ -418,7 +458,7 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
     end
     imgui.SameLine(0, 0)
     imgui.Dummy({ ROW_PAD_X, 1 })
-    if has_meter then
+    if fraction ~= nil then
         imgui.Dummy({ 0, S(4) })
     end
     if pad_y > 0 then
@@ -437,42 +477,16 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
     end
     local well_w = math.max(row_w, panel.fit_w or 0, zone_w)
 
-    local function paint_back()
-        local radius = S(3)
-        -- Wells stay solid. The window frame's fade does not apply here.
-        fill(dl, x1, y1, well_w, row_h, HEX.well, radius, 1)
-        outline(dl, x1, y1, well_w, row_h, HEX.line, radius, 1)
-        if not has_meter or well_w <= S(8) then
-            return
-        end
-        local mh = math.max(2, S(3))
-        local mx = x1 + S(4)
-        local mw = flush and (well_w - (mx - x1)) or (well_w - S(8))
-        local my = y2 - S(2) - mh
-        fill(dl, mx, my, mw, mh, HEX.off, mh / 2, 1)
-        local frac = math.max(0, math.min(1, fraction or 0))
-        if frac <= 0 then
-            return
-        end
-        local meter = HEX.amber
-        if bar_color == COLORS.dark_grey then
-            meter = mix(HEX.amber, HEX.off, 0.45)
-        end
-        fill(dl, mx, my, math.max(mh, mw * frac), mh, meter, mh / 2, 1)
-    end
-
     if layer == 'outer' then
         pcall(function() dl:ChannelsSetCurrent(1) end)
-        paint_back()
+        paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush)
         pcall(function() dl:ChannelsSetCurrent(2) end)
     elseif layer == 'inner' then
         pcall(function() dl:ChannelsSetCurrent(0) end)
-        paint_back()
+        paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush)
         pcall(function() dl:ChannelsMerge() end)
-    elseif has_meter then
-        local mh = math.max(2, S(3))
-        local my = y2 - S(2) - mh
-        fill(dl, x1, my, well_w, mh, HEX.off, mh / 2, 1)
+    else
+        grounds_next[ground_key] = { well_w, row_h }
     end
     if add_spacing ~= false then
         imgui.Dummy({ 0, S(1) })
@@ -562,7 +576,9 @@ local function draw_header()
 
     local close_color = close_hover and HEX.rose or HEX.dim
     glyph(dl, 'close', close_cx, cy, close_color, 1.5, panel.chrome)
-    mark_width(close_cx + box / 2 - content_left)
+    -- Mark what the header needs, not where the close mark landed. The close
+    -- mark follows fit_w, so its spot would hold a too-wide frame for frames.
+    mark_width(min_span - S(6))
 
     local rule_y = select(2, imgui.GetCursorScreenPos())
     local rule_w = math.max(panel.fit_w or 0, close_cx + box / 2 - content_left)
@@ -578,6 +594,7 @@ local function begin_layers(dl)
     panel.plates = {}
     panel.layered = false
     panel.section_mark = nil
+    panel.section_key = nil
     if dl == nil or dl.ChannelsSplit == nil then
         return
     end
@@ -588,9 +605,17 @@ local function begin_layers(dl)
     panel.layered = ok and true or false
 end
 
-local function section_begin()
+local function section_begin(title)
     local x, y = imgui.GetCursorScreenPos()
-    panel.section_mark = { x = x, y = y, fade = 1 }
+    local fade = folded[title] and panel.chrome or 1
+    local mark = { x = x, y = y, fade = fade, key = 'plate.' .. title }
+    panel.section_mark = mark
+    panel.section_key, panel.section_row = title, 0
+    local h = not panel.layered and grounds[mark.key]
+    if h then
+        fill(imgui.GetWindowDrawList(), x, y, panel.fit_w or 0, h, HEX.bg, S(SECTION_RADIUS), fade)
+        mark.painted = (panel.fit_w or 0) > 0
+    end
 end
 
 local function section_end()
@@ -607,6 +632,7 @@ local function section_end()
     if y2 <= mark.y then
         return
     end
+    grounds_next[mark.key] = y2 - mark.y
     panel.plates[#panel.plates + 1] = {
         x = mark.x, y = mark.y, y2 = y2, fade = mark.fade or 1,
     }
@@ -1313,7 +1339,7 @@ function ui.render()
         draw_header()
         local shown = false
         if show_goblin then
-            section_begin()
+            section_begin('Goblin Dailies')
             if draw_section_header('Goblin Dailies') then
                 draw_goblins(saved)
             end
@@ -1324,7 +1350,7 @@ function ui.render()
             if shown then
                 section_gap()
             end
-            section_begin()
+            section_begin('Palalumin Quests')
             draw_palalumin(saved)
             section_end()
             shown = true
@@ -1333,7 +1359,7 @@ function ui.render()
             if shown then
                 section_gap()
             end
-            section_begin()
+            section_begin('AMAN Targets')
             if draw_section_header('AMAN Targets') then
                 draw_enemies(regime.view())
             end
@@ -1343,6 +1369,7 @@ function ui.render()
             panel.fit_w = panel.fit_now
         end
         paint_plates(layers)
+        grounds, grounds_next = grounds_next, {}
         draw_shadow()
     end
     imgui.End()

@@ -177,6 +177,8 @@ local buttons, texts, drawn = {}, {}, {}
 local style_colors, dummies, rects = {}, {}, {}
 local title_alpha = nil
 local began = 0
+local tips, tooltip_depth = {}, 0
+local sequence = {}
 local slider_mode = 'idle'
 local slider_id = nil
 local click_id = nil
@@ -186,6 +188,7 @@ local draw_list = {
     AddRect = function() end,
     AddRectFilled = function(_, _, _, col)
         rects[#rects + 1] = col
+        sequence[#sequence + 1] = { 'rect', col }
     end,
     AddTriangleFilled = function() end,
     ChannelsSplit = function() end,
@@ -227,16 +230,22 @@ local imgui = {
     Spacing = function() end,
     TextColored = function(_, text)
         texts[#texts + 1] = text
+        sequence[#sequence + 1] = { 'text', text }
     end,
-    TextUnformatted = function() end,
+    TextUnformatted = function(text)
+        if tooltip_depth > 0 then
+            tips[#tips + 1] = text
+        end
+    end,
     InvisibleButton = function(id)
         buttons[#buttons + 1] = id
+        sequence[#sequence + 1] = { 'button', id }
         if id == click_id then
             world.arm_click = true
         end
     end,
     IsItemHovered = function()
-        return false
+        return world.hover_items and true or false
     end,
     IsItemClicked = function()
         if world.arm_click then
@@ -269,10 +278,13 @@ local imgui = {
     PopStyleVar = function() end,
     PushFont = function() end,
     PopFont = function() end,
+    -- Stock Ashita's ImGui 1.80 BeginTooltip returns nothing.
     BeginTooltip = function()
-        return false
+        tooltip_depth = tooltip_depth + 1
     end,
-    EndTooltip = function() end,
+    EndTooltip = function()
+        tooltip_depth = tooltip_depth - 1
+    end,
     SetNextWindowSizeConstraints = function() end,
     SetNextItemWidth = function() end,
     AlignTextToFramePadding = function() end,
@@ -863,6 +875,8 @@ local function render()
     title_alpha = nil
     slider_id = nil
     world.trade_color = nil
+    tips, tooltip_depth = {}, 0
+    sequence = {}
     local ok, err = xpcall(ui.render, debug.traceback)
     if not ok then
         fail('render\n' .. tostring(err))
@@ -903,6 +917,25 @@ local function has_rect(col)
     for _, painted in ipairs(rects) do
         if painted == col then
             return true
+        end
+    end
+    return false
+end
+
+-- True when col is among the rects painted just before the named text or
+-- button, with nothing else drawn between them.
+local function laid_under(col, kind, value)
+    for i, event in ipairs(sequence) do
+        if event[1] == kind and event[2] == value then
+            for j = i - 1, 1, -1 do
+                if sequence[j][1] ~= 'rect' then
+                    return false
+                end
+                if sequence[j][2] == col then
+                    return true
+                end
+            end
+            return false
         end
     end
     return false
@@ -1010,6 +1043,40 @@ click_id = '##fold.Goblin Dailies'
 render()
 truthy(has_text('Secret chest at '), 'expanding the section shows its rows')
 eq(has_rect(bg_rect(0)), false, 'an open header stays opaque off the window')
+
+world.hover_items = true
+render()
+eq(tooltip_depth, 0, 'every tooltip closes before the window ends')
+local zone_tip = false
+for _, tip in ipairs(tips) do
+    if tip == 'Open FFXI Wiki: Garlaige Citadel' then
+        zone_tip = true
+    end
+end
+truthy(zone_tip, 'a hovered link shows its tooltip')
+world.hover_items = false
+
+-- Stock Ashita's ImGui binds no draw-list channels.
+local channels_split = draw_list.ChannelsSplit
+draw_list.ChannelsSplit = nil
+render()
+render()
+local well = ((255 * 256 + 0x17) * 256 + 0x10) * 256 + 0x0E
+truthy(laid_under(bg_rect(255), 'button', '##fold.AMAN Targets'), 'without channels the section ground goes down first')
+truthy(laid_under(well, 'text', 'Donjon Bats'), 'without channels a row well goes under its text')
+truthy(laid_under(well, 'text', 'Secret chest at '), 'without channels a static row well goes under its text')
+world.hover = true
+clock = clock + 1
+render()
+clock = clock + 1
+render()
+truthy(laid_under(bg_rect(255), 'button', '##fold.AMAN Targets'), 'without channels the section ground stays opaque on hover')
+world.hover = false
+clock = clock + 1
+render()
+clock = clock + 1
+render()
+draw_list.ChannelsSplit = channels_split
 
 cfg.opacity = 40
 cfg.deadline = 0
