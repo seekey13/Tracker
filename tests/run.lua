@@ -1476,7 +1476,7 @@ local needs = {
 local npc = actors[1794]
 
 local function offer()
-    return dailies.trade_button(needs)
+    return dailies.trade_button('Palalumin', needs)
 end
 
 clock = 100000
@@ -1557,7 +1557,7 @@ local held = slots[1]
 slots[1] = { Id = 1001, Count = 12, Flags = 1 }
 eq(offer(), 'blocked', 'locked stacks gray the button')
 eq(select(2, offer()), 'locked', 'locked stacks are the reason')
-eq(dailies.trade_start(needs), false, 'a locked stack is not traded')
+eq(dailies.trade_start('Palalumin', needs), false, 'a locked stack is not traded')
 local spare = slots[4]
 slots[4] = nil
 slots[1] = { Id = 1001, Count = 5, Flags = 1 }
@@ -1599,11 +1599,11 @@ cfg.palalumin_quests = {
 }
 
 actors[10].status = 4
-truthy(dailies.trade_start(needs), 'queue the turn-in')
+truthy(dailies.trade_start('Palalumin', needs), 'queue the turn-in')
 dailies.trade_update()
 eq(#captured, 0, 'no trade while an event is open')
 eq(offer(), 'wait', 'the button waits out the event')
-eq(dailies.trade_start(needs), false, 'a second click does not queue another')
+eq(dailies.trade_start('Palalumin', needs), false, 'a second click does not queue another')
 actors[10].status = 0
 dailies.trade_update()
 eq(#captured, 1, 'one trade once the event ends')
@@ -1615,7 +1615,7 @@ clock = 100002
 dailies.trade_update()
 eq(#captured, 1, 'two seconds does not finish the wait')
 eq(offer(), 'wait', 'the button stays gray during the wait')
-eq(dailies.trade_start(needs), false, 'three seconds have not elapsed')
+eq(dailies.trade_start('Palalumin', needs), false, 'three seconds have not elapsed')
 
 clock = 100010
 actors[10].status = 4
@@ -1625,19 +1625,19 @@ eq(offer(), 'wait', 'the button stays down through the event')
 actors[10].status = 0
 dailies.trade_update()
 eq(offer(), 'ready', 'the button returns after the event and the delay')
-truthy(dailies.trade_start(needs), 'a later turn-in is allowed')
+truthy(dailies.trade_start('Palalumin', needs), 'a later turn-in is allowed')
 dailies.trade_update()
 eq(#captured, 2, 'the later turn-in is a single packet')
 check_turnin(captured[2], 'second turn-in')
 clock = 100012
-eq(dailies.trade_start(needs), false, 'the next trade waits three seconds')
+eq(dailies.trade_start('Palalumin', needs), false, 'the next trade waits three seconds')
 dailies.trade_update()
 eq(#captured, 2, 'no packet during that delay')
 
 local saved_count = slots[1].Count
 clock = 100020
 trade.cancel()
-truthy(dailies.trade_start(needs), 'queue a stack that then changes')
+truthy(dailies.trade_start('Palalumin', needs), 'queue a stack that then changes')
 slots[1].Count = 3
 dailies.trade_update()
 eq(#captured, 2, 'a short stack is not traded')
@@ -1722,15 +1722,15 @@ holder.slots = {}
 for slot = 1, 9 do
     holder.slots[slot] = { Id = 1001, Count = 1, Flags = 0 }
 end
-local nine_state, nine_why = dailies.trade_button({ { name = 'Phuabo Organ', needed = 9 } })
+local nine_state, nine_why = dailies.trade_button('Palalumin', { { name = 'Phuabo Organ', needed = 9 } })
 eq(nine_state, 'blocked', 'nine stacks gray the button')
 eq(nine_why, 'stacks', 'nine stacks do not fit one trade')
-eq(dailies.trade_start({ { name = 'Phuabo Organ', needed = 9 } }), false, 'nine stacks are not sent')
+eq(dailies.trade_start('Palalumin', { { name = 'Phuabo Organ', needed = 9 } }), false, 'nine stacks are not sent')
 eq(#captured, 2, 'a refused trade sends nothing')
 holder.max_slot = 8
 holder.slots[9] = nil
 clock = clock + 3
-truthy(dailies.trade_start({ { name = 'Phuabo Organ', needed = 8 } }), 'eight stacks fit one trade')
+truthy(dailies.trade_start('Palalumin', { { name = 'Phuabo Organ', needed = 8 } }), 'eight stacks fit one trade')
 dailies.trade_update()
 eq(#captured, 3, 'eight stacks are one packet')
 eq(captured[3].data[61], 8, 'eight entries')
@@ -1762,23 +1762,23 @@ actors[10].status = 0
 render()
 truthy(has_drawn('Trade'), 'the row shows Trade')
 eq(world.trade_color, rgba_u32('#FFFFFF'), 'the trade button is lit')
-local trade_i = button_at('##pala.trade')
+local trade_i = button_at('##trade.Palalumin')
 local pala_header = button_at('##fold.Palalumin Quests')
 truthy(trade_i and pala_header and pala_header < trade_i, 'the trade button is on the palalumin row')
 
 holder.slots[2].Count = 0
 render()
-eq(button_at('##pala.trade'), nil, 'missing items hide the button')
+eq(button_at('##trade.Palalumin'), nil, 'missing items hide the button')
 eq(world.trade_color, nil, 'missing items draw no label')
 holder.slots[2].Count = 5
 
 world.zone = 33
 render()
-eq(button_at('##pala.trade'), nil, 'the button is not drawn outside HuXzoi')
+eq(button_at('##trade.Palalumin'), nil, 'the button is not drawn outside HuXzoi')
 world.zone = 34
 npc.dist = 36
 render()
-eq(button_at('##pala.trade'), nil, 'the button is not drawn out of range')
+eq(button_at('##trade.Palalumin'), nil, 'the button is not drawn out of range')
 npc.dist = 0.25
 render()
 eq(world.trade_color, rgba_u32('#FFFFFF'), 'the button returns in range')
@@ -1799,10 +1799,10 @@ truthy(locked_tip, 'the gray button says the stack is locked')
 holder.slots[2] = spare_xzomit
 
 cfg.palalumin_quests['Item request'].completed = true
-eq(dailies.trade_start(needs), false, 'a finished request is not traded')
+eq(dailies.trade_start('Palalumin', needs), false, 'a finished request is not traded')
 cfg.palalumin_quests['Item request'].completed = nil
 
-click_id = '##pala.trade'
+click_id = '##trade.Palalumin'
 render()
 eq(offer(), 'wait', 'the click leaves the turn-in pending')
 render()
@@ -1813,7 +1813,7 @@ eq(#captured, sent_before + 1, 'present sends the one queued trade')
 check_turnin(captured[#captured], 'row trade')
 handlers.d3d_present()
 eq(#captured, sent_before + 1, 'present does not send a second trade')
-click_id = '##pala.trade'
+click_id = '##trade.Palalumin'
 render()
 eq(world.trade_color, rgba_u32('#7B8095'), 'the gray button stays gray')
 handlers.d3d_present()
@@ -1825,7 +1825,7 @@ dailies.trade_update()
 world.target = 'Palalumin'
 text_in('Quest Completed', 121)
 cfg.palalumin_quests['Item request'].completed = nil
-truthy(dailies.trade_start(needs), 'queue the completion trade')
+truthy(dailies.trade_start('Palalumin', needs), 'queue the completion trade')
 dailies.trade_update()
 eq(cfg.palalumin_quests['Item request'].completed, nil, 'sending does not finish the quest by itself')
 text_in('Quest Completed', 121)
@@ -1836,7 +1836,7 @@ world.target = nil
 clock = clock + 3
 dailies.trade_update()
 cfg.palalumin_quests['Item request'].completed = nil
-truthy(dailies.trade_start(needs), 'queue a turn-in with nothing targeted')
+truthy(dailies.trade_start('Palalumin', needs), 'queue a turn-in with nothing targeted')
 dailies.trade_update()
 text_in('Quest Completed', 121)
 eq(cfg.palalumin_quests['Item request'].completed, true, 'a button turn-in completes the request with nothing targeted')
@@ -1849,7 +1849,7 @@ eq(cfg.palalumin_quests['Item request'].completed, nil, 'the next line with noth
 clock = clock + 3
 dailies.trade_update()
 eq(cfg.palalumin_quests['Item request'].completed, nil, 'items he hands back leave the request open')
-truthy(dailies.trade_start(needs), 'queue a turn-in he keeps')
+truthy(dailies.trade_start('Palalumin', needs), 'queue a turn-in he keeps')
 dailies.trade_update()
 local phuabo, xzomit = holder.slots[1], holder.slots[2]
 holder.slots[1] = { Id = 1001, Count = 2, Flags = 0 }
@@ -1865,8 +1865,103 @@ eq(cfg.palalumin_quests['Item request'].completed, true, 'items he kept complete
 eq(saves, saves_before_kept + 1, 'the completed request is saved')
 render()
 eq(has_text('Phuabo Organ'), false, 'a completed request leaves the panel')
-eq(button_at('##pala.trade'), nil, 'a completed request has no trade button')
+eq(button_at('##trade.Palalumin'), nil, 'a completed request has no trade button')
 holder.slots[1], holder.slots[2] = phuabo, xzomit
+
+-- Beetrix takes his one item in Lower Jeuno, from his own spot.
+local BEETRIX_X, BEETRIX_Y = -50.75, -56.37
+names[1004] = 'Gusgen Clay'
+holder.slots[5] = { Id = 1004, Count = 3, Flags = 0 }
+actors[1830] = { name = 'Beetrix', id = 17782822, flags = 0x200, dist = 0.25, status = 0, x = BEETRIX_X, y = BEETRIX_Y }
+local beetrix = actors[1830]
+local clay = { { name = 'Gusgen Clay', needed = 1 } }
+local function beetrix_offer()
+    return dailies.trade_button('Beetrix', clay)
+end
+cfg.dailies = {
+    Beetrix = {
+        message = 'Go to Gusgen Mines, get a Gusgen Clay and trade it to me!',
+        item = 'Gusgen Clay',
+        zone = 'Gusgen Mines',
+    },
+}
+-- The Palalumin turn-in above saw no "Quest Completed". This one disarms it.
+world.target = nil
+text_in('Quest Completed', 121)
+cfg.palalumin_quests['Item request'].completed = nil
+clock = clock + 3
+dailies.trade_update()
+
+eq(beetrix_offer(), nil, 'Beetrix is not looked for in HuXzoi')
+eq(offer(), 'ready', 'Palalumin still trades in HuXzoi')
+world.zone = 245
+player.x, player.y = BEETRIX_X, BEETRIX_Y
+eq(beetrix_offer(), 'ready', 'Lower Jeuno at his spot can trade')
+eq(offer(), nil, 'Palalumin is not looked for in Lower Jeuno')
+player.x = BEETRIX_X + 3.01
+eq(beetrix_offer(), nil, 'past 3 yalms of his spot hides the button')
+player.x = BEETRIX_X
+beetrix.dist = 9.01
+eq(beetrix_offer(), nil, 'Beetrix past 3 yalms hides the button')
+beetrix.dist = 0.25
+
+render()
+local beetrix_i = button_at('##trade.Beetrix')
+local goblin_header = button_at('##fold.Goblin Dailies')
+truthy(beetrix_i and goblin_header and goblin_header < beetrix_i, 'the trade button is on the goblin row')
+eq(button_at('##trade.Palalumin'), nil, 'no Palalumin button in Lower Jeuno')
+truthy(has_text('1/1'), 'the row keeps its count beside the button')
+eq(world.trade_color, rgba_u32('#FFFFFF'), 'the Beetrix button is lit')
+
+holder.slots[5].Flags = 1
+eq(beetrix_offer(), 'blocked', 'a locked item grays the button')
+eq(dailies.trade_start('Beetrix', clay), false, 'a locked item is not traded')
+holder.slots[5].Flags = 0
+cfg.dailies.Beetrix.status = 'complete'
+eq(dailies.trade_start('Beetrix', clay), false, 'a finished daily is not traded')
+cfg.dailies.Beetrix.status = nil
+
+click_id = '##trade.Beetrix'
+render()
+eq(beetrix_offer(), 'wait', 'the click leaves the turn-in pending')
+eq(offer(), nil, 'the pending turn-in does not gray the Palalumin row')
+local beetrix_sent = #captured
+handlers.d3d_present()
+eq(#captured, beetrix_sent + 1, 'present sends the one queued trade')
+local beetrix_packet = captured[#captured]
+eq(beetrix_packet.id, 0x36, 'beetrix packet id')
+eq(read_u32(beetrix_packet.data, 5), 17782822, 'beetrix npc id')
+eq(read_u32(beetrix_packet.data, 9), 1, 'one item from the stack of three')
+eq(read_u32(beetrix_packet.data, 13), 0, 'no second stack')
+eq(beetrix_packet.data[49], 5, 'beetrix slot')
+eq(read_u16(beetrix_packet.data, 59), 1830, 'beetrix npc index')
+eq(beetrix_packet.data[61], 1, 'beetrix entry count')
+handlers.d3d_present()
+eq(#captured, beetrix_sent + 1, 'present does not send a second trade')
+
+-- His turn-in does not arm Palalumin's "Quest Completed".
+world.target = nil
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'a Beetrix turn-in leaves the Palalumin request open')
+
+clock = clock + 3
+dailies.trade_update()
+eq(dailies.is_complete(cfg.dailies.Beetrix), false, 'an item he hands back leaves the daily open')
+truthy(dailies.trade_start('Beetrix', clay), 'queue a turn-in he keeps')
+dailies.trade_update()
+holder.slots[5] = { Id = 1004, Count = 2, Flags = 0 }
+clock = clock + 3
+local saves_before_beetrix = saves
+dailies.trade_update()
+eq(cfg.dailies.Beetrix.status, 'complete', 'the item he kept completes the daily')
+eq(saves, saves_before_beetrix + 1, 'the completed daily is saved')
+render()
+eq(button_at('##trade.Beetrix'), nil, 'a completed daily has no trade button')
+eq(has_text('Gusgen Clay'), false, 'a completed daily leaves the panel')
+holder.slots[5] = nil
+actors[1830] = nil
+world.zone = 34
+player.x, player.y = SPOT_X, SPOT_Y
 
 AshitaCore.GetMemoryManager = old_memory
 AshitaCore.GetResourceManager = old_resources

@@ -18,7 +18,8 @@ dailies.pala_order = P.PALALUMIN_ORDER
 
 local cfg
 local recent_trade = false
--- The button sends to Palalumin whatever the player has targeted.
+-- The button sends to Palalumin whatever the player has targeted. A turn-in
+-- to Beetrix leaves this alone.
 local button_trade = false
 local counts = nil
 local item_ids = {}
@@ -385,34 +386,54 @@ end
 
 -- nil hides the button. 'ready' can be clicked. 'wait' and 'blocked' are
 -- gray, and 'blocked' also returns why the owned items cannot go.
-function dailies.trade_button(items)
-    return trade.button(items)
+function dailies.trade_button(npc, items)
+    return trade.button(npc, items)
 end
 
-function dailies.trade_start(items)
+-- The row a turn-in to npc is for, while it is still open.
+local function open_request(npc)
     if cfg == nil then
-        return false
+        return nil
     end
-    local row = cfg.palalumin_quests and cfg.palalumin_quests['Item request']
-    if type(row) ~= 'table' or row.completed then
-        return false
-    end
-    return trade.start(items)
-end
-
--- One attempt per frame. Once Palalumin keeps the items, the request is
--- complete and its row leaves the panel. A sent turn-in also arms the flag a
--- hand-traded 0x036 does, so "Quest Completed" can still close the row. A
--- click does not target Palalumin, so that line counts with anything targeted.
-function dailies.trade_update()
-    local result = trade.update()
-    if result == 'sent' then
-        recent_trade = true
-        button_trade = true
-    elseif result == 'traded' and cfg ~= nil then
+    if npc == 'Palalumin' then
         local row = cfg.palalumin_quests and cfg.palalumin_quests['Item request']
         if type(row) == 'table' and not row.completed then
-            row.completed = true
+            return row
+        end
+    elseif npc == 'Beetrix' then
+        local row = cfg.dailies and cfg.dailies.Beetrix
+        if type(row) == 'table' and not dailies.is_complete(row) then
+            return row
+        end
+    end
+    return nil
+end
+
+function dailies.trade_start(npc, items)
+    if not open_request(npc) then
+        return false
+    end
+    return trade.start(npc, items)
+end
+
+-- One attempt per frame. Once the npc keeps the items, the request is
+-- complete and its row leaves the panel. A turn-in sent to Palalumin also
+-- arms the flag a hand-traded 0x036 does, so "Quest Completed" can still
+-- close the row. A click does not target Palalumin, so that line counts with
+-- anything targeted.
+function dailies.trade_update()
+    local result, npc = trade.update()
+    if result == 'sent' and npc == 'Palalumin' then
+        recent_trade = true
+        button_trade = true
+    elseif result == 'traded' then
+        local row = open_request(npc)
+        if row then
+            if npc == 'Beetrix' then
+                row.status = 'complete'
+            else
+                row.completed = true
+            end
             save()
         end
     end

@@ -1015,10 +1015,10 @@ end
 
 -- The hit target is invisible. The face drawn over it is the button, so a
 -- pending or blocked turn-in can go gray without a second widget.
-local function draw_trade_button(state, why)
+local function draw_trade_button(npc, state, why)
     local w, h, pad_x, th = trade_button_size()
     pcall(imgui.AlignTextToFramePadding)
-    imgui.InvisibleButton('##pala.trade', { w, h })
+    imgui.InvisibleButton('##trade.' .. npc, { w, h })
     local ready = state == 'ready'
     local hovered = imgui.IsItemHovered()
     local hot = ready and hovered
@@ -1038,7 +1038,7 @@ local function draw_trade_button(state, why)
     outline(dl, x1, y1, w, h, edge, S(3), 1)
     dl:AddText({ x1 + pad_x, (y1 + y2) / 2 - th / 2 }, u32(fg), TRADE_LABEL)
     if hot then
-        show_tooltip('Trade these items to Palalumin')
+        show_tooltip('Trade to ' .. npc)
     elseif hovered and state == 'blocked' then
         show_tooltip(TRADE_BLOCKED[why])
     end
@@ -1097,7 +1097,11 @@ local function draw_goblins(saved)
                 local bar_color = has_item and COLORS.grey_bar or COLORS.dark_grey
                 local label_color, highlight_color = progress_colors(has_item)
                 local count_text = have and (tostring(math.min(have, 1)) .. '/1') or '?/1'
-                draw_bar(fraction, count_text, bar_color, function()
+                local needs = { { name = row.item, needed = 1 } }
+                local offer, why = dailies.trade_button('Beetrix', needs)
+                -- With the button, the count sits left of it, so the button
+                -- ends the row as it does on Palalumin's.
+                draw_bar(fraction, offer and '' or count_text, bar_color, function()
                     imgui.TextColored(label_color, 'Trade ')
                     imgui.SameLine()
                     draw_item_link(row.item, highlight_color)
@@ -1105,6 +1109,16 @@ local function draw_goblins(saved)
                     imgui.TextColored(label_color, ' found at ')
                     imgui.SameLine()
                     draw_zone_link(row.zone, highlight_color)
+                    if offer then
+                        local gap = S(8)
+                        place_after(S(8), piece_w(count_text) + gap + trade_button_size())
+                        local hex = (bar_color == COLORS.grey_bar) and HEX.dim or HEX.text2
+                        imgui.TextColored(rgba(hex), count_text)
+                        imgui.SameLine(0, gap)
+                        if draw_trade_button('Beetrix', offer, why) then
+                            dailies.trade_start('Beetrix', needs)
+                        end
+                    end
                 end)
             else
                 local text = dailies.goblin_line(npc, row)
@@ -1174,11 +1188,11 @@ local function draw_palalumin(saved)
                     end
                     imgui.SameLine()
                     imgui.TextColored(summary_label, ' ')
-                    local offer, why = dailies.trade_button(items)
+                    local offer, why = dailies.trade_button('Palalumin', items)
                     if offer then
                         place_after(S(12), trade_button_size())
-                        if draw_trade_button(offer, why) then
-                            dailies.trade_start(items)
+                        if draw_trade_button('Palalumin', offer, why) then
+                            dailies.trade_start('Palalumin', items)
                         end
                     end
                 end, false)

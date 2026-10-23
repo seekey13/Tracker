@@ -1,5 +1,5 @@
 --[[
-Tracker - one Palalumin turn-in.
+Tracker - one turn-in to Palalumin or Beetrix.
 
 The 0x036 body is the one XIIM tradeit builds and checks against the client's
 own packets: a zero header (Ashita fills that in), the npc id, ten quantities,
@@ -12,21 +12,24 @@ local P = require('lib.daily_parse')
 
 local trade = {}
 
-local NPC_NAME = 'Palalumin'
--- Where Palalumin stands in Hu'Xzoi: X and Y as mobdb shows them.
-local NPC_X, NPC_Y = -8.61, -357.43
+-- Where each npc stands: X and Y as mobdb shows them. Nothing looks for one
+-- anywhere else.
+local NPCS = {
+    Palalumin = { zone = P.ZONE_HUXZOI, x = -8.61, y = -357.43 },
+    Beetrix = { zone = P.ZONE_LOWER_JEUNO, x = -50.75, y = -56.37 },
+}
 local TRADE_RANGE = 9 -- GetDistance is squared yalms; 3 yalms
 local SEARCH_EVERY = 1 -- seconds between walks of every entity
 local MAX_ENTRIES = 8 -- one trade window
 local COOLDOWN = 3
 
 -- The click that has not finished yet, or nil.
--- entries are the slots and counts chosen at the click.
+-- npc is who it goes to. entries are the slots and counts chosen at the click.
 local run = nil
 local last_sent = nil
--- Palalumin's index from the last walk, and when that walk ran.
-local known_index = nil
-local searched_at = nil
+-- Each npc's index from the last walk, and when that walk ran.
+local known_index = {}
+local searched_at = {}
 -- Item ids by name. The button asks every frame, and a name search walks the
 -- whole item table.
 local item_ids = {}
@@ -58,10 +61,9 @@ local function clean_name(name)
     return (name:gsub('%z.*', ''):gsub('%s+$', ''))
 end
 
--- True in Hu'Xzoi within 3 yalms of Palalumin's spot. Nothing looks for him
--- anywhere else, including the other Lumoria zones.
-local function at_spot()
-    if zone_id() ~= P.ZONE_HUXZOI then
+-- True in the npc's zone within 3 yalms of its spot.
+local function at_spot(spot)
+    if zone_id() ~= spot.zone then
         return false
     end
     local ok, x, y = pcall(function()
@@ -73,16 +75,17 @@ local function at_spot()
     if not ok or type(x) ~= 'number' or type(y) ~= 'number' then
         return false
     end
-    local dx, dy = x - NPC_X, y - NPC_Y
+    local dx, dy = x - spot.x, y - spot.y
     return dx * dx + dy * dy <= TRADE_RANGE
 end
 
--- Index and server id of Palalumin when this character stands at his spot
--- and he is within 3 yalms. The index the last walk found is checked each
--- frame. A walk of every entity runs only when that index is no longer him,
--- and at most once a second.
-local function find_npc()
-    if not at_spot() then
+-- Index and server id of the npc when this character stands at its spot and
+-- it is within 3 yalms. The index the last walk found is checked each frame.
+-- A walk of every entity runs only when that index is no longer the npc, and
+-- at most once a second.
+local function find_npc(npc)
+    local spot = NPCS[npc]
+    if spot == nil or not at_spot(spot) then
         return nil
     end
     local found_i, found_id
@@ -91,9 +94,9 @@ local function find_npc()
         if entity == nil or entity.GetName == nil then
             return
         end
-        -- The server id when index i is a rendered Palalumin, else nil.
+        -- The server id when index i is the npc and rendered, else nil.
         local function live(i)
-            if clean_name(entity:GetName(i)) ~= NPC_NAME then
+            if clean_name(entity:GetName(i)) ~= npc then
                 return nil
             end
             local sid = entity:GetServerId(i)
@@ -103,18 +106,18 @@ local function find_npc()
             end
             return sid
         end
-        local sid = known_index and live(known_index)
+        local sid = known_index[npc] and live(known_index[npc])
         if not sid then
             local now = os.clock()
-            if searched_at ~= nil and now - searched_at < SEARCH_EVERY then
+            if searched_at[npc] ~= nil and now - searched_at[npc] < SEARCH_EVERY then
                 return
             end
-            searched_at = now
-            known_index = nil
+            searched_at[npc] = now
+            known_index[npc] = nil
             for i = 0, 0x8FF do
                 sid = live(i)
                 if sid then
-                    known_index = i
+                    known_index[npc] = i
                     break
                 end
             end
@@ -122,9 +125,9 @@ local function find_npc()
                 return
             end
         end
-        local dist = entity:GetDistance(known_index)
+        local dist = entity:GetDistance(known_index[npc])
         if type(dist) == 'number' and dist <= TRADE_RANGE then
-            found_i = known_index
+            found_i = known_index[npc]
             found_id = sid
         end
     end)
@@ -266,7 +269,7 @@ end
 
 -- The snapshot still has to be those items. A stack that shrank is not sent
 -- short, and a stack that grew is not sent in full. before is the stack as
--- sent, so taken() can tell whether Palalumin kept it.
+-- sent, so taken() can tell whether the npc kept it.
 local function confirm(entries)
     local inv = inventory()
     if inv == nil or inv.GetContainerItem == nil then
@@ -285,8 +288,8 @@ local function confirm(entries)
     return live
 end
 
--- True when every sent stack is down by what was sent: Palalumin kept the
--- items. False when one is not, as when he hands them back. Nil when the
+-- True when every sent stack is down by what was sent: the npc kept the
+-- items. False when one is not, as when it hands them back. Nil when the
 -- inventory cannot be read.
 local function taken(live)
     local inv = inventory()
@@ -360,13 +363,17 @@ local function cooling_down(now)
     return last_sent ~= nil and (now - last_sent) < COOLDOWN
 end
 
---- nil when the button stays off the row. 'ready' or 'wait' when it is shown.
---- 'blocked' is gray too, and pick's reason comes with it.
-function trade.button(needs)
+--- nil when the button stays off the npc's row. 'ready' or 'wait' when it is
+--- shown. 'blocked' is gray too, and pick's reason comes with it.
+function trade.button(npc, needs)
     if run ~= nil then
-        return 'wait'
+        -- The other npc's row stays as it was, not gray.
+        if run.npc == npc then
+            return 'wait'
+        end
+        return nil
     end
-    if not find_npc() then
+    if not find_npc(npc) then
         return nil
     end
     local entries, why = pick(needs)
@@ -384,18 +391,18 @@ end
 
 --- Queue the one turn-in. False when a trade is already waiting, cooling
 --- down, or the slots cannot make exactly this request.
-function trade.start(needs)
+function trade.start(npc, needs)
     if run ~= nil or cooling_down(os.clock()) then
         return false
     end
-    if not find_npc() then
+    if not find_npc(npc) then
         return false
     end
     local entries = pick(needs)
     if not entries then
         return false
     end
-    run = { entries = entries, sent = false }
+    run = { npc = npc, entries = entries, sent = false }
     return true
 end
 
@@ -404,14 +411,15 @@ function trade.cancel()
 end
 
 --- Send the queued trade once it is safe to. 'sent' on the frame it is sent.
---- 'traded' on the frame the wait after it ends, when Palalumin kept the
---- items. False otherwise.
+--- 'traded' on the frame the wait after it ends, when the npc kept the
+--- items. Either comes with the npc's name. False otherwise.
 function trade.update()
     if run == nil then
         return false
     end
+    local npc = run.npc
     local zone = zone_id()
-    if zone ~= nil and zone ~= P.ZONE_HUXZOI then
+    if zone ~= nil and zone ~= NPCS[npc].zone then
         run = nil
         return false
     end
@@ -425,7 +433,7 @@ function trade.update()
         local kept = taken(run.live)
         run = nil
         if kept then
-            return 'traded'
+            return 'traded', npc
         end
         return false
     end
@@ -433,7 +441,7 @@ function trade.update()
         return false
     end
     local now = os.clock()
-    local index, sid = find_npc()
+    local index, sid = find_npc(npc)
     local live = index and confirm(run.entries) or nil
     if not index or not live then
         if zone == nil then
@@ -457,7 +465,7 @@ function trade.update()
         last_sent = previous
         return false
     end
-    return 'sent'
+    return 'sent', npc
 end
 
 return trade
