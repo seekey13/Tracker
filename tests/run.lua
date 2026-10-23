@@ -1844,6 +1844,30 @@ cfg.palalumin_quests['Item request'].completed = nil
 text_in('Quest Completed', 121)
 eq(cfg.palalumin_quests['Item request'].completed, nil, 'the next line with nothing targeted leaves the request open')
 
+-- Without any chat line: items he hands back leave the request open, and
+-- items he keeps complete it, so its row leaves the panel.
+clock = clock + 3
+dailies.trade_update()
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'items he hands back leave the request open')
+truthy(dailies.trade_start(needs), 'queue a turn-in he keeps')
+dailies.trade_update()
+local phuabo, xzomit = holder.slots[1], holder.slots[2]
+holder.slots[1] = { Id = 1001, Count = 2, Flags = 0 }
+holder.slots[2] = nil
+actors[10].status = 4
+clock = clock + 3
+dailies.trade_update()
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'the request stays open through his event')
+actors[10].status = 0
+local saves_before_kept = saves
+dailies.trade_update()
+eq(cfg.palalumin_quests['Item request'].completed, true, 'items he kept complete the request')
+eq(saves, saves_before_kept + 1, 'the completed request is saved')
+render()
+eq(has_text('Phuabo Organ'), false, 'a completed request leaves the panel')
+eq(button_at('##pala.trade'), nil, 'a completed request has no trade button')
+holder.slots[1], holder.slots[2] = phuabo, xzomit
+
 AshitaCore.GetMemoryManager = old_memory
 AshitaCore.GetResourceManager = old_resources
 AshitaCore.GetPacketManager = old_packets

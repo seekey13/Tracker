@@ -400,13 +400,21 @@ function dailies.trade_start(items)
     return trade.start(items)
 end
 
--- One attempt per frame. A sent turn-in arms the same completion flag a
--- hand-traded 0x036 does, so "Quest Completed" can close the item row. A
+-- One attempt per frame. Once Palalumin keeps the items, the request is
+-- complete and its row leaves the panel. A sent turn-in also arms the flag a
+-- hand-traded 0x036 does, so "Quest Completed" can still close the row. A
 -- click does not target Palalumin, so that line counts with anything targeted.
 function dailies.trade_update()
-    if trade.update() then
+    local result = trade.update()
+    if result == 'sent' then
         recent_trade = true
         button_trade = true
+    elseif result == 'traded' and cfg ~= nil then
+        local row = cfg.palalumin_quests and cfg.palalumin_quests['Item request']
+        if type(row) == 'table' and not row.completed then
+            row.completed = true
+            save()
+        end
     end
 end
 

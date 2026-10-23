@@ -265,7 +265,8 @@ local function pick(needs)
 end
 
 -- The snapshot still has to be those items. A stack that shrank is not sent
--- short, and a stack that grew is not sent in full.
+-- short, and a stack that grew is not sent in full. before is the stack as
+-- sent, so taken() can tell whether Palalumin kept it.
 local function confirm(entries)
     local inv = inventory()
     if inv == nil or inv.GetContainerItem == nil then
@@ -274,13 +275,38 @@ local function confirm(entries)
     local live = {}
     for _, entry in ipairs(entries) do
         local read_ok, item = pcall(inv.GetContainerItem, inv, 0, entry.slot)
+        local have = read_ok and item and tonumber(item.Count) or 0
         if not read_ok or item == nil or item.Id ~= entry.id or item.Flags ~= 0
-            or (tonumber(item.Count) or 0) < entry.count then
+            or have < entry.count then
             return nil
         end
-        live[#live + 1] = { slot = entry.slot, count = entry.count }
+        live[#live + 1] = { slot = entry.slot, id = entry.id, count = entry.count, before = have }
     end
     return live
+end
+
+-- True when every sent stack is down by what was sent: Palalumin kept the
+-- items. False when one is not, as when he hands them back. Nil when the
+-- inventory cannot be read.
+local function taken(live)
+    local inv = inventory()
+    if inv == nil or inv.GetContainerItem == nil then
+        return nil
+    end
+    for _, entry in ipairs(live) do
+        local read_ok, item = pcall(inv.GetContainerItem, inv, 0, entry.slot)
+        if not read_ok then
+            return nil
+        end
+        local now = 0
+        if item and item.Id == entry.id then
+            now = tonumber(item.Count) or 0
+        end
+        if now > entry.before - entry.count then
+            return false
+        end
+    end
+    return true
 end
 
 local function u32(n)
@@ -377,7 +403,9 @@ function trade.cancel()
     run = nil
 end
 
---- Send the queued trade once it is safe to. True only on the frame it is sent.
+--- Send the queued trade once it is safe to. 'sent' on the frame it is sent.
+--- 'traded' on the frame the wait after it ends, when Palalumin kept the
+--- items. False otherwise.
 function trade.update()
     if run == nil then
         return false
@@ -394,7 +422,11 @@ function trade.update()
         if os.clock() < run.deadline then
             return false
         end
+        local kept = taken(run.live)
         run = nil
+        if kept then
+            return 'traded'
+        end
         return false
     end
     if in_event() then
@@ -413,6 +445,7 @@ function trade.update()
 
     local previous = last_sent
     run.sent = true
+    run.live = live
     last_sent = now
     run.deadline = now + COOLDOWN
     local packet = to_bytes(trade.build_trade(sid, index, live))
@@ -424,7 +457,7 @@ function trade.update()
         last_sent = previous
         return false
     end
-    return true
+    return 'sent'
 end
 
 return trade
