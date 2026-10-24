@@ -1236,8 +1236,26 @@ local function draw_palalumin(saved)
     end
 end
 
+-- After the turn-in, he offers to keep the fragments he gave for it.
+local function draw_fragments(fragments)
+    local count_text = 'x' .. fragments
+    local needs = { { id = parse.AETHER_FRAGMENT_ID, needed = fragments } }
+    local offer, why = dailies.trade_button(parse.AETHER_NPC, needs)
+    draw_bar(nil, offer and '' or count_text, nil, function()
+        imgui.TextColored(COLORS.white, 'Store Aether Fragments?')
+        if offer then
+            draw_count_trade(parse.AETHER_NPC, needs, count_text, nil, offer, why)
+        end
+    end)
+end
+
 -- His one request this week: three of one item.
 local function draw_aether(saved)
+    local fragments = dailies.aether_fragments()
+    if fragments then
+        draw_fragments(fragments)
+        return
+    end
     local item = saved.aether.item
     local wanted = parse.AETHER_COUNT
     local have = dailies.item_count(item)
@@ -1392,7 +1410,10 @@ end
 
 local function has_aether(saved)
     local row = saved.aether
-    return type(row) == 'table' and type(row.item) == 'string' and not row.completed
+    if type(row) ~= 'table' or type(row.item) ~= 'string' then
+        return false
+    end
+    return not row.completed or dailies.aether_fragments() ~= nil
 end
 
 local function has_aman()
@@ -1502,6 +1523,8 @@ function ui.render()
         return
     end
 
+    -- The Aether Traveler's section counts fragments to decide if it shows.
+    dailies.begin_frame()
     local show_goblin = has_goblin(saved)
     local show_pala = has_pala(saved)
     local show_aether = has_aether(saved)
@@ -1510,7 +1533,6 @@ function ui.render()
         return
     end
 
-    dailies.begin_frame()
     if not panel.scale_held then
         user_scale = ui.scale()
     end

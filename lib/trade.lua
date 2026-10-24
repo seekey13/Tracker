@@ -164,8 +164,9 @@ local function lookup_id(item_name)
     return nil
 end
 
--- `{name, needed}` rows become item ids. One unresolved name drops the trade:
--- guessing would put the wrong thing in the packet.
+-- `{name, needed}` rows become item ids. A row may give its id instead. One
+-- unresolved name drops the trade: guessing would put the wrong thing in the
+-- packet.
 local function resolve(needs)
     if type(needs) ~= 'table' then
         return nil
@@ -175,8 +176,9 @@ local function resolve(needs)
     for _, item in ipairs(needs) do
         local name = type(item.name) == 'string' and item.name:match('^%s*(.-)%s*$') or ''
         local count = tonumber(item.needed or item.count) or 0
-        if name ~= '' and count > 0 then
-            local id = lookup_id(name)
+        local id = tonumber(item.id)
+        if (id or name ~= '') and count > 0 then
+            id = id or lookup_id(name)
             if not id then
                 return nil
             end

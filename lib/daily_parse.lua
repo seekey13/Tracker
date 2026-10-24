@@ -21,6 +21,7 @@ P.ZONE_PORT_JEUNO = 246
 
 P.AETHER_NPC = 'Aether Traveler'
 P.AETHER_COUNT = 3
+P.AETHER_FRAGMENT_ID = 2999
 
 function P.is_lumoria(zone)
     return zone == P.ZONE_ALTAIEU or zone == P.ZONE_HUXZOI or zone == P.ZONE_RUHMET

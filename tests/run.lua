@@ -2061,6 +2061,9 @@ truthy(button_at('##trade.Aether Traveler'), 'the trade button is on his row')
 truthy(has_text('3/3'), 'the row keeps its count beside the button')
 eq(world.trade_color, rgba_u32('#FFFFFF'), 'the aether traveler button is lit')
 
+-- Two fragments are already carried. His reward stacks three more on them.
+-- They are found by id 2999 alone: the client's name for them is never asked.
+holder.slots[8] = { Id = 2999, Count = 2, Flags = 0 }
 click_id = '##trade.Aether Traveler'
 render()
 eq(aether_offer(), 'wait', 'the click leaves his turn-in pending')
@@ -2080,15 +2083,61 @@ eq(aether_packet.data[61], 2, 'aether traveler entry count')
 
 holder.slots[6] = nil
 holder.slots[7] = { Id = 1005, Count = 4, Flags = 0 }
+holder.slots[8].Count = 5
 clock = clock + 3
 local saves_before_aether = saves
 dailies.trade_update()
 eq(cfg.aether.completed, true, 'the items he kept complete the request')
+eq(cfg.aether.fragments_before, 2, 'the fragments carried before his turn-in are noted')
 eq(saves, saves_before_aether + 1, 'the completed request is saved')
+dailies.begin_frame()
+eq(dailies.aether_fragments(), 3, 'his reward is what is offered for storing')
+
+-- He offers to keep the fragments he just gave.
 render()
-eq(button_at('##fold.Aether Traveler'), nil, 'a completed request hides the section')
-eq(button_at('##trade.Aether Traveler'), nil, 'a completed request has no trade button')
+truthy(button_at('##fold.Aether Traveler'), 'the section stays to store his fragments')
+truthy(has_text('Store Aether Fragments?'), 'the row offers to store the fragments')
+truthy(has_text('x3'), 'the row counts only the fragments he gave')
+eq(has_text('Dragon Bone'), false, 'the finished request leaves the row')
+truthy(button_at('##trade.Aether Traveler'), 'the fragments can be traded at his spot')
+eq(world.trade_color, rgba_u32('#FFFFFF'), 'the store button is lit')
+lines = {}
+dailies.report()
+truthy(printed('Aether Traveler: Store Aether Fragments? x3'), 'report the fragments to store')
+
+player.x = AETHER_X + 3.01
+render()
+truthy(has_text('Store Aether Fragments?'), 'away from his spot the offer stays')
+eq(button_at('##trade.Aether Traveler'), nil, 'away from his spot the offer has no button')
+player.x = AETHER_X
+holder.slots[8].Count = 2
+render()
+eq(button_at('##fold.Aether Traveler'), nil, 'with his fragments gone the section hides')
+holder.slots[8].Count = 5
+
+click_id = '##trade.Aether Traveler'
+render()
+local store_sent = #captured
+handlers.d3d_present()
+eq(#captured, store_sent + 1, 'present sends the fragments')
+local store_packet = captured[#captured]
+eq(read_u32(store_packet.data, 5), 17786880, 'the fragments go to him')
+eq(read_u32(store_packet.data, 9), 3, 'only the fragments he gave are sent')
+eq(store_packet.data[49], 8, 'fragment slot')
+eq(store_packet.data[61], 1, 'one fragment entry')
+eq(cfg.aether.fragments_before, 2, 'sending the fragments keeps the note')
+
+holder.slots[8].Count = 2
+clock = clock + 3
+dailies.trade_update()
+eq(cfg.aether.fragments_before, nil, 'the fragments he kept close the offer')
+eq(cfg.aether.completed, true, 'storing leaves the request done')
+holder.slots[8].Count = 5
+render()
+eq(button_at('##fold.Aether Traveler'), nil, 'stored fragments hide the section')
+eq(button_at('##trade.Aether Traveler'), nil, 'stored fragments have no trade button')
 holder.slots[7] = nil
+holder.slots[8] = nil
 actors[1792] = nil
 cfg.aether = nil
 world.zone = 34

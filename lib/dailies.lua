@@ -22,6 +22,8 @@ local recent_trade = false
 -- The button sends to Palalumin whatever the player has targeted. A turn-in
 -- to Beetrix leaves this alone.
 local button_trade = false
+-- Aether Fragments carried when the week's items went to the Aether Traveler.
+local fragments_before = nil
 local counts = nil
 local item_ids = {}
 
@@ -113,10 +115,11 @@ local function lookup_item_id(item_name)
 end
 
 -- Inventory only (container 0), locked stacks included. Slot 0 is gil, so
--- the count runs from slot 1, as a trade does. Nil when the client cannot
--- answer yet.
+-- the count runs from slot 1, as a trade does. item_name may be an item id.
+-- Nil when the client cannot answer yet.
 function dailies.item_count(item_name)
-    if type(item_name) ~= 'string' or item_name == '' then
+    local by_id = type(item_name) == 'number'
+    if not by_id and (type(item_name) ~= 'string' or item_name == '') then
         return nil
     end
     if counts and counts[item_name] ~= nil then
@@ -126,7 +129,7 @@ function dailies.item_count(item_name)
         end
         return cached
     end
-    local item_id = lookup_item_id(item_name)
+    local item_id = by_id and item_name or lookup_item_id(item_name)
     if not item_id then
         if counts then
             counts[item_name] = false
@@ -442,12 +445,28 @@ local function open_request(npc)
             return row
         end
     elseif npc == P.AETHER_NPC then
+        -- The week's items, then the fragments he gave for them.
         local row = cfg.aether
-        if type(row) == 'table' and not row.completed then
+        if type(row) == 'table' and (not row.completed or row.fragments_before) then
             return row
         end
     end
     return nil
+end
+
+-- The Aether Fragments his turn-in gave that are still carried, while the
+-- offer to store them stands. Nil otherwise.
+function dailies.aether_fragments()
+    local row = cfg and cfg.aether
+    if type(row) ~= 'table' or not row.completed or row.fragments_before == nil then
+        return nil
+    end
+    local held = dailies.item_count(P.AETHER_FRAGMENT_ID)
+    local before = tonumber(row.fragments_before) or 0
+    if held == nil or held <= before then
+        return nil
+    end
+    return held - before
 end
 
 function dailies.trade_start(npc, items)
@@ -461,17 +480,28 @@ end
 -- complete and its row leaves the panel. A turn-in sent to Palalumin also
 -- arms the flag a hand-traded 0x036 does, so "Quest Completed" can still
 -- close the row. A click does not target Palalumin, so that line counts with
--- anything targeted.
+-- anything targeted. Once the Aether Traveler keeps the week's items, his row
+-- offers to store the fragments he gave, until he keeps those too.
 function dailies.trade_update()
     local result, npc = trade.update()
     if result == 'sent' and npc == 'Palalumin' then
         recent_trade = true
         button_trade = true
+    elseif result == 'sent' and npc == P.AETHER_NPC then
+        local row = open_request(npc)
+        if row and not row.completed then
+            fragments_before = dailies.item_count(P.AETHER_FRAGMENT_ID) or 0
+        end
     elseif result == 'traded' then
         local row = open_request(npc)
         if row then
             if npc == 'Beetrix' then
                 row.status = 'complete'
+            elseif npc == P.AETHER_NPC and row.completed then
+                row.fragments_before = nil
+            elseif npc == P.AETHER_NPC then
+                row.completed = true
+                row.fragments_before = fragments_before or 0
             else
                 row.completed = true
             end
@@ -513,6 +543,8 @@ function dailies.report()
         return
     end
     dailies.roll_day()
+    -- A closed window leaves the last frame's counts behind.
+    dailies.begin_frame()
     local completed = 0
     for _, npc in ipairs(P.GOBLIN_ORDER) do
         local row = cfg.dailies[npc]
@@ -541,8 +573,11 @@ function dailies.report()
     end
     report_palalumin()
     local aether = cfg.aether
+    local fragments = dailies.aether_fragments()
     if type(aether) == 'table' and not aether.completed then
         print(chat.header(addon.name) .. P.AETHER_NPC .. ': Trade ' .. tostring(aether.item) .. ' x' .. P.AETHER_COUNT)
+    elseif fragments then
+        print(chat.header(addon.name) .. P.AETHER_NPC .. ': Store Aether Fragments? x' .. fragments)
     end
 end
 
