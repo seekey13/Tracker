@@ -644,6 +644,23 @@ name, count = parse.item_need('Gusgen Clay')
 eq(name, 'Gusgen Clay', 'bare item')
 eq(count, 1, 'bare item counts as one')
 
+local written, single = parse.read_aether(
+    'Aether Traveler : Yes... This week I require three dragon bones. Bring them to me and you shall have the fragments.'
+)
+eq(written, 'Dragon Bones', 'aether item as written')
+eq(single, 'Dragon Bone', 'aether item singular')
+written, single = parse.read_aether(
+    '\31\06Aether Traveler : Yes... This week I require 3 rolanberries. Bring them to me and you shall have the fragments.'
+)
+eq(written, 'Rolanberries', 'a digit count and a color byte')
+eq(single, 'Rolanberry', 'ies plural')
+written, single = parse.read_aether('Aether Traveler : This week I require three copper boxes. Bring them to me.')
+eq(single, 'Copper Box', 'es plural')
+written, single = parse.read_aether('Aether Traveler : This week I require three brass ingots. Bring them to me.')
+eq(single, 'Brass Ingot', 'only the last word is plural')
+eq(parse.read_aether('Beetrix : Go to Gusgen Mines, get a Gusgen Clay and trade it to me!'), nil, 'another npc')
+eq(parse.read_aether('Aether Traveler : Welcome, traveler.'), nil, 'other aether talk')
+
 local enemies = parser.parse_enemies('5 Donjon Bats. 2 Kabooms. 3 Members of the Gigas Family.')
 eq(#enemies, 3, 'three enemies')
 eq(enemies[1].name, 'Donjon Bats', 'bats name')
@@ -794,6 +811,29 @@ text_in('\129\158 Find flux: The Garden of RuHmet', 9)
 eq(cfg.palalumin_quests['Find flux'].zone, 'Keep', 'reopen does not rewrite the row')
 eq(cfg.palalumin_flagged, true, 'reopen still counts as the menu')
 
+local aether_line = 'Aether Traveler : Yes... This week I require three dragon bones. '
+    .. 'Bring them to me and you shall have the fragments.'
+world.zone = 245
+text_in(aether_line, 9)
+eq(cfg.aether, nil, 'the aether traveler is heard only in Port Jeuno')
+world.zone = 246
+text_in(aether_line, 121)
+eq(cfg.aether, nil, 'his request is npc dialogue')
+text_in(aether_line, 9)
+eq(cfg.aether.item, 'Dragon Bone', 'an item the client does not know is kept singular')
+local week_end = cfg.aether.deadline
+local jst = os.date('!*t', week_end + 32400)
+eq(jst.wday, 2, 'his week ends on a Monday in Japan')
+eq(jst.hour + jst.min + jst.sec, 0, 'his week ends at midnight in Japan')
+truthy(week_end > os.time() and week_end <= os.time() + 7 * 86400, 'his week ends within seven days')
+cfg.aether.completed = true
+text_in(aether_line, 9)
+eq(cfg.aether.completed, true, 'hearing the same special again leaves it done')
+text_in('Aether Traveler : Yes... This week I require three bat wings. Bring them to me and you shall have the fragments.', 9)
+eq(cfg.aether.item, 'Bat Wing', 'a new item replaces the request')
+eq(cfg.aether.completed, nil, 'a new item is open')
+world.zone = 33
+
 cfg.palalumin_quests['Defeat mobs'].completed = nil
 cfg.palalumin_quests['Defeat mobs'].killed = 3
 cfg.palalumin_quests['Defeat mobs'].total = 10
@@ -807,6 +847,12 @@ truthy(printed('Beetrix: '), 'report beetrix')
 truthy(printed('Complete!'), 'report complete')
 truthy(printed('Goldilox: '), 'report reward')
 truthy(printed('Kill 7 more Zdei at Grand Palace of HuXzoi (10 total)'), 'report pala')
+truthy(printed('Aether Traveler: Trade Bat Wing x3'), 'report aether')
+cfg.aether.completed = true
+lines = {}
+dailies.report()
+eq(printed('Aether Traveler'), false, 'a finished request is not reported')
+cfg.aether = nil
 
 local prompt = "A tome has been placed here by the Adventurers' Mutual Aid Network (A.M.A.N.)"
 text_in('Training regime canceled.', 121)
@@ -1263,6 +1309,7 @@ draw_list.ChannelsSplit = channels_split
 cfg.opacity = 40
 cfg.deadline = 0
 cfg.version = 1
+cfg.aether = { item = 'Bat Wing', deadline = os.time() + 3600 }
 local enemy_table = regime.view().enemies
 truthy(dailies.roll_day(), 'a new day rolls')
 eq(cfg.opacity, 40, 'day roll keeps opacity')
@@ -1270,6 +1317,10 @@ eq(regime.view().is_active, true, 'day roll keeps the regime')
 eq(regime.view().enemies, enemy_table, 'day roll keeps the enemy table')
 eq(cfg.dailies.Fishstix, nil, 'day roll clears goblins')
 eq(cfg.palalumin_flagged, false, 'day roll clears palalumin')
+eq(cfg.aether and cfg.aether.item, 'Bat Wing', 'day roll keeps the aether request')
+cfg.aether.deadline = os.time()
+dailies.roll_day()
+eq(cfg.aether, nil, 'the end of his week drops the request')
 cfg.version = 2
 cfg.dailies.Fishstix = { zone = 'X' }
 cfg.opacity = 40
@@ -1960,6 +2011,86 @@ eq(button_at('##trade.Beetrix'), nil, 'a completed daily has no trade button')
 eq(has_text('Gusgen Clay'), false, 'a completed daily leaves the panel')
 holder.slots[5] = nil
 actors[1830] = nil
+world.zone = 34
+player.x, player.y = SPOT_X, SPOT_Y
+
+-- The Aether Traveler takes three of his week's item in Port Jeuno, from his own spot.
+local AETHER_X, AETHER_Y = -160.34, 90.87
+names[1005] = 'Dragon Bone'
+names[1006] = 'Wyvern Scales'
+actors[1792] = { name = 'Aether Traveler', id = 17786880, flags = 0x200, dist = 0.25, status = 0, x = AETHER_X, y = AETHER_Y }
+local traveler = actors[1792]
+local bones = { { name = 'Dragon Bone', needed = 3 } }
+local function aether_offer()
+    return dailies.trade_button('Aether Traveler', bones)
+end
+
+world.zone = 246
+text_in('Aether Traveler : Yes... This week I require three wyvern scales. Bring them to me and you shall have the fragments.', 9)
+eq(cfg.aether.item, 'Wyvern Scales', 'an item the client knows as written keeps that name')
+text_in('Aether Traveler : Yes... This week I require three dragon bones. Bring them to me and you shall have the fragments.', 9)
+eq(cfg.aether.item, 'Dragon Bone', 'otherwise the singular names the item')
+
+holder.slots[6] = { Id = 1005, Count = 2, Flags = 0 }
+player.x, player.y = AETHER_X, AETHER_Y
+clock = clock + 3
+eq(aether_offer(), nil, 'two of three hide the button')
+render()
+local aether_header = button_at('##fold.Aether Traveler')
+local pala_fold = button_at('##fold.Palalumin Quests')
+truthy(aether_header and pala_fold and pala_fold < aether_header, 'the aether traveler section follows palalumin')
+truthy(has_text('2/3'), 'the row counts what is carried of three')
+eq(button_at('##trade.Aether Traveler'), nil, 'two of three draw no button')
+
+holder.slots[7] = { Id = 1005, Count = 5, Flags = 0 }
+eq(aether_offer(), 'ready', 'Port Jeuno at his spot with three can trade')
+eq(beetrix_offer(), nil, 'Beetrix is not looked for in Port Jeuno')
+world.zone = 245
+player.x, player.y = BEETRIX_X, BEETRIX_Y
+eq(aether_offer(), nil, 'the aether traveler is not looked for in Lower Jeuno')
+world.zone = 246
+player.x, player.y = AETHER_X + 3.01, AETHER_Y
+eq(aether_offer(), nil, 'past 3 yalms of his spot hides the button')
+player.x = AETHER_X
+traveler.dist = 9.01
+eq(aether_offer(), nil, 'the aether traveler past 3 yalms hides the button')
+traveler.dist = 0.25
+
+render()
+truthy(button_at('##trade.Aether Traveler'), 'the trade button is on his row')
+truthy(has_text('3/3'), 'the row keeps its count beside the button')
+eq(world.trade_color, rgba_u32('#FFFFFF'), 'the aether traveler button is lit')
+
+click_id = '##trade.Aether Traveler'
+render()
+eq(aether_offer(), 'wait', 'the click leaves his turn-in pending')
+local aether_sent = #captured
+handlers.d3d_present()
+eq(#captured, aether_sent + 1, 'present sends his one queued trade')
+local aether_packet = captured[#captured]
+eq(aether_packet.id, 0x36, 'aether traveler packet id')
+eq(read_u32(aether_packet.data, 5), 17786880, 'aether traveler npc id')
+eq(read_u32(aether_packet.data, 9), 2, 'the whole first stack')
+eq(read_u32(aether_packet.data, 13), 1, 'one from the second stack')
+eq(read_u32(aether_packet.data, 17), 0, 'no third stack')
+eq(aether_packet.data[49], 6, 'first aether traveler slot')
+eq(aether_packet.data[50], 7, 'second aether traveler slot')
+eq(read_u16(aether_packet.data, 59), 1792, 'aether traveler npc index')
+eq(aether_packet.data[61], 2, 'aether traveler entry count')
+
+holder.slots[6] = nil
+holder.slots[7] = { Id = 1005, Count = 4, Flags = 0 }
+clock = clock + 3
+local saves_before_aether = saves
+dailies.trade_update()
+eq(cfg.aether.completed, true, 'the items he kept complete the request')
+eq(saves, saves_before_aether + 1, 'the completed request is saved')
+render()
+eq(button_at('##fold.Aether Traveler'), nil, 'a completed request hides the section')
+eq(button_at('##trade.Aether Traveler'), nil, 'a completed request has no trade button')
+holder.slots[7] = nil
+actors[1792] = nil
+cfg.aether = nil
 world.zone = 34
 player.x, player.y = SPOT_X, SPOT_Y
 

@@ -2,7 +2,8 @@
 Tracker - CatsEye daily text.
 
 Goblins in Lower Jeuno and Palalumin in Lumoria announce the day's work in
-NPC chat (mode 9). Kill counts, turn-ins, and the Goldilox dice roll arrive
+NPC chat (mode 9). The Aether Traveler in Port Jeuno names the week's item
+there too. Kill counts, turn-ins, and the Goldilox dice roll arrive
 as system lines (mode 121). A /huh motion reply can arrive on any mode.
 The patterns are the ones Goldilox matched against the live server.
 ]]
@@ -16,6 +17,10 @@ P.ZONE_ALTAIEU = 33
 P.ZONE_HUXZOI = 34
 P.ZONE_RUHMET = 35
 P.ZONE_LOWER_JEUNO = 245
+P.ZONE_PORT_JEUNO = 246
+
+P.AETHER_NPC = 'Aether Traveler'
+P.AETHER_COUNT = 3
 
 function P.is_lumoria(zone)
     return zone == P.ZONE_ALTAIEU or zone == P.ZONE_HUXZOI or zone == P.ZONE_RUHMET
@@ -236,6 +241,45 @@ function P.item_need(text)
         return trim(name), tonumber(count)
     end
     return trim(text), 1
+end
+
+local function title(s)
+    return (s:gsub('(%a)([%w\']*)', function(first, rest)
+        return first:upper() .. rest
+    end))
+end
+
+-- "dragon bones" -> "dragon bone". Only the last word is plural.
+local function singular(phrase)
+    local head, last = phrase:match('^(.-)(%S+)$')
+    if last == nil then
+        return phrase
+    end
+    local lower = last:lower()
+    if lower:match('[^aeiou]ies$') then
+        last = last:sub(1, -4) .. 'y'
+    elseif lower:match('[sxz]es$') or lower:match('[cs]hes$') then
+        last = last:sub(1, -3)
+    elseif lower:match('[^s]s$') then
+        last = last:sub(1, -2)
+    end
+    return head .. last
+end
+
+-- "Aether Traveler : Yes... This week I require three dragon bones. Bring
+-- them to me and you shall have the fragments." He always asks for three.
+-- Returns the item as written and its singular, each in title case, or nil.
+function P.read_aether(text)
+    local wanted = string.match(P.strip(text), P.AETHER_NPC .. '%s*:.-This week I require (.-)%.%s+Bring')
+    if wanted == nil then
+        return nil
+    end
+    wanted = trim(wanted)
+    wanted = wanted:match('^%d+%s+(.+)$') or wanted:match('^[Tt]hree%s+(.+)$') or wanted
+    if wanted == '' then
+        return nil
+    end
+    return title(wanted), title(singular(wanted))
 end
 
 return P

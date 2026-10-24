@@ -1,9 +1,10 @@
 --[[
-Tracker - goblin dailies and Palalumin quests.
+Tracker - goblin dailies, Palalumin quests, and the Aether Traveler's week.
 
-Dialogue is taken in Lower Jeuno (goblins) or Lumoria (Palalumin). Progress
-after that is a system line, a trade packet, or a count of items in the
-inventory. The set resets at Japanese midnight.
+Dialogue is taken in Lower Jeuno (goblins), Lumoria (Palalumin), or Port
+Jeuno (the Aether Traveler). Progress after that is a system line, a trade
+packet, or a count of items in the inventory. The dailies reset at Japanese
+midnight. The Aether Traveler's request lasts until midnight Monday there.
 ]]
 
 local chat = require('chat')
@@ -46,11 +47,29 @@ function dailies.begin_frame()
     counts = {}
 end
 
+-- His week is taken to end at 00:00 JST Monday. 1970-01-01 was a Thursday,
+-- three days past a Monday.
+local function week_deadline()
+    local offset = tonumber(cfg.offset) or (60 * 60 * 9)
+    local day = math.floor((os.time() + offset) / 86400)
+    return (day - (day + 3) % 7 + 7) * 86400 - offset
+end
+
+-- A request heard in an earlier week is gone.
+local function roll_week()
+    local row = cfg.aether
+    if row ~= nil and not (type(row) == 'table' and os.time() < (tonumber(row.deadline) or 0)) then
+        cfg.aether = nil
+        save()
+    end
+end
+
 -- The day rolls at 00:00 JST. offset is seconds ahead of UTC (9 hours).
 function dailies.roll_day()
     if cfg == nil then
         return false
     end
+    roll_week()
     local offset = tonumber(cfg.offset) or (60 * 60 * 9)
     local now = os.time()
     local deadline = math.floor((now + offset) / 86400) * 86400 + 86400 - offset
@@ -302,6 +321,23 @@ function dailies.on_text(e)
         return
     end
 
+    if zone == P.ZONE_PORT_JEUNO then
+        local named, single = P.read_aether(clean)
+        if named == nil then
+            return
+        end
+        -- The name as he wrote it when the client knows it, else the singular.
+        local item = lookup_item_id(named) and named or single
+        -- Hearing the special again after the turn-in leaves it done.
+        local prev = cfg.aether
+        if type(prev) == 'table' and prev.completed and prev.item == item then
+            return
+        end
+        cfg.aether = { item = item, deadline = week_deadline() }
+        save()
+        return
+    end
+
     if P.is_lumoria(zone) then
         local found = P.read_palalumin(clean, cfg.palalumin_quests)
         if not found then
@@ -405,6 +441,11 @@ local function open_request(npc)
         if type(row) == 'table' and not dailies.is_complete(row) then
             return row
         end
+    elseif npc == P.AETHER_NPC then
+        local row = cfg.aether
+        if type(row) == 'table' and not row.completed then
+            return row
+        end
     end
     return nil
 end
@@ -439,6 +480,34 @@ function dailies.trade_update()
     end
 end
 
+local function report_palalumin()
+    if not cfg.palalumin_flagged then
+        return
+    end
+    local flagged = 0
+    local known = 0
+    local rows = cfg.palalumin_quests or {}
+    for _, name in ipairs(P.PALALUMIN_ORDER) do
+        local row = rows[name]
+        if row then
+            known = known + 1
+        end
+        if row and not row.completed then
+            flagged = flagged + 1
+            if flagged == 1 then
+                print(chat.header(addon.name) .. 'Palalumin quests:')
+            end
+            local line = pala_status(name, row)
+            if line then
+                print(chat.header(addon.name) .. '\129\158 ' .. P.strip(line))
+            end
+        end
+    end
+    if flagged == 0 and known < #P.PALALUMIN_ORDER then
+        print(chat.header(addon.name) .. 'Palalumin quests active.')
+    end
+end
+
 function dailies.report()
     if cfg == nil then
         return
@@ -470,30 +539,10 @@ function dailies.report()
             print(preamble .. chat.color1(68, 'Reward not collected.'))
         end
     end
-    if not cfg.palalumin_flagged then
-        return
-    end
-    local flagged = 0
-    local known = 0
-    local rows = cfg.palalumin_quests or {}
-    for _, name in ipairs(P.PALALUMIN_ORDER) do
-        local row = rows[name]
-        if row then
-            known = known + 1
-        end
-        if row and not row.completed then
-            flagged = flagged + 1
-            if flagged == 1 then
-                print(chat.header(addon.name) .. 'Palalumin quests:')
-            end
-            local line = pala_status(name, row)
-            if line then
-                print(chat.header(addon.name) .. '\129\158 ' .. P.strip(line))
-            end
-        end
-    end
-    if flagged == 0 and known < #P.PALALUMIN_ORDER then
-        print(chat.header(addon.name) .. 'Palalumin quests active.')
+    report_palalumin()
+    local aether = cfg.aether
+    if type(aether) == 'table' and not aether.completed then
+        print(chat.header(addon.name) .. P.AETHER_NPC .. ': Trade ' .. tostring(aether.item) .. ' x' .. P.AETHER_COUNT)
     end
 end
 

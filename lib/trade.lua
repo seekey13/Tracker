@@ -1,5 +1,5 @@
 --[[
-Tracker - one turn-in to Palalumin or Beetrix.
+Tracker - one turn-in to Palalumin, Beetrix, or the Aether Traveler.
 
 The 0x036 body is the one XIIM tradeit builds and checks against the client's
 own packets: a zero header (Ashita fills that in), the npc id, ten quantities,
@@ -17,6 +17,7 @@ local trade = {}
 local NPCS = {
     Palalumin = { zone = P.ZONE_HUXZOI, x = -8.61, y = -357.43 },
     Beetrix = { zone = P.ZONE_LOWER_JEUNO, x = -50.75, y = -56.37 },
+    [P.AETHER_NPC] = { zone = P.ZONE_PORT_JEUNO, x = -160.34, y = 90.87 },
 }
 local TRADE_RANGE = 9 -- GetDistance is squared yalms; 3 yalms
 local SEARCH_EVERY = 1 -- seconds between walks of every entity

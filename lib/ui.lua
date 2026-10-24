@@ -1045,6 +1045,19 @@ local function draw_trade_button(npc, state, why)
     return ready and clicked and true or false
 end
 
+-- With the button, the row's count sits left of it, so the button ends the
+-- row as it does on Palalumin's.
+local function draw_count_trade(npc, needs, count_text, bar_color, offer, why)
+    local gap = S(8)
+    place_after(S(8), piece_w(count_text) + gap + trade_button_size())
+    local hex = (bar_color == COLORS.grey_bar) and HEX.dim or HEX.text2
+    imgui.TextColored(rgba(hex), count_text)
+    imgui.SameLine(0, gap)
+    if draw_trade_button(npc, offer, why) then
+        dailies.trade_start(npc, needs)
+    end
+end
+
 local function draw_goblins(saved)
     local rows = saved.dailies or {}
     local completed = 0
@@ -1099,8 +1112,6 @@ local function draw_goblins(saved)
                 local count_text = have and (tostring(math.min(have, 1)) .. '/1') or '?/1'
                 local needs = { { name = row.item, needed = 1 } }
                 local offer, why = dailies.trade_button('Beetrix', needs)
-                -- With the button, the count sits left of it, so the button
-                -- ends the row as it does on Palalumin's.
                 draw_bar(fraction, offer and '' or count_text, bar_color, function()
                     imgui.TextColored(label_color, 'Trade ')
                     imgui.SameLine()
@@ -1110,14 +1121,7 @@ local function draw_goblins(saved)
                     imgui.SameLine()
                     draw_zone_link(row.zone, highlight_color)
                     if offer then
-                        local gap = S(8)
-                        place_after(S(8), piece_w(count_text) + gap + trade_button_size())
-                        local hex = (bar_color == COLORS.grey_bar) and HEX.dim or HEX.text2
-                        imgui.TextColored(rgba(hex), count_text)
-                        imgui.SameLine(0, gap)
-                        if draw_trade_button('Beetrix', offer, why) then
-                            dailies.trade_start('Beetrix', needs)
-                        end
+                        draw_count_trade('Beetrix', needs, count_text, bar_color, offer, why)
                     end
                 end)
             else
@@ -1230,6 +1234,28 @@ local function draw_palalumin(saved)
             draw_notice('Quests active', HEX.amber)
         end
     end
+end
+
+-- His one request this week: three of one item.
+local function draw_aether(saved)
+    local item = saved.aether.item
+    local wanted = parse.AETHER_COUNT
+    local have = dailies.item_count(item)
+    local is_done = have ~= nil and have >= wanted
+    local fraction = have and (math.min(have, wanted) / wanted) or 0
+    local bar_color = is_done and COLORS.grey_bar or (have == nil and COLORS.dark_grey or nil)
+    local label_color, highlight_color = progress_colors(is_done)
+    local count_text = (have and tostring(math.min(have, wanted)) or '?') .. '/' .. wanted
+    local needs = { { name = item, needed = wanted } }
+    local offer, why = dailies.trade_button(parse.AETHER_NPC, needs)
+    draw_bar(fraction, offer and '' or count_text, bar_color, function()
+        imgui.TextColored(label_color, 'Trade ')
+        imgui.SameLine()
+        draw_item_link(item, highlight_color)
+        if offer then
+            draw_count_trade(parse.AETHER_NPC, needs, count_text, bar_color, offer, why)
+        end
+    end)
 end
 
 local function draw_regime_line(state)
@@ -1364,6 +1390,11 @@ local function has_pala(saved)
     return known < #dailies.pala_order
 end
 
+local function has_aether(saved)
+    local row = saved.aether
+    return type(row) == 'table' and type(row.item) == 'string' and not row.completed
+end
+
 local function has_aman()
     local state = regime.view()
     return state.is_active and type(state.enemies) == 'table' and #state.enemies > 0
@@ -1473,8 +1504,9 @@ function ui.render()
 
     local show_goblin = has_goblin(saved)
     local show_pala = has_pala(saved)
+    local show_aether = has_aether(saved)
     local show_aman = has_aman()
-    if not show_goblin and not show_pala and not show_aman then
+    if not show_goblin and not show_pala and not show_aether and not show_aman then
         return
     end
 
@@ -1537,6 +1569,17 @@ function ui.render()
             end
             section_begin('Palalumin Quests')
             draw_palalumin(saved)
+            section_end()
+            shown = true
+        end
+        if show_aether then
+            if shown then
+                section_gap()
+            end
+            section_begin('Aether Traveler')
+            if draw_section_header('Aether Traveler') then
+                draw_aether(saved)
+            end
             section_end()
             shown = true
         end

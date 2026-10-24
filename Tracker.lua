@@ -1,6 +1,7 @@
 --[[
 Tracker
-Goblin dailies, Palalumin quests, and AMAN training regimes.
+Goblin dailies, Palalumin quests, the Aether Traveler's week, and AMAN
+training regimes.
 Copyright (c) 2026 Seekey
 https://github.com/seekey13/Tracker
 
@@ -189,7 +190,7 @@ local function help()
     printf('Tracker commands:')
     printf('  /tracker             Show this help')
     printf('  /tracker ui          Show or hide the window')
-    printf('  /tracker dailies     Print goblin and Palalumin status')
+    printf('  /tracker dailies     Print goblin, Palalumin, and Aether Traveler status')
     printf('  /tracker clear       Clear the AMAN regime')
     printf('  /tracker debug       Toggle death-packet logging')
     printf('  /tracker test <name> Test an enemy name against the regime')
