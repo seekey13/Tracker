@@ -1,6 +1,6 @@
 # Tracker
 
-Goblin dailies, Palalumin quests, and AMAN training targets in one Vanacore panel. CatsEye XI only.
+Goblin dailies, Palalumin quests, the Aether Traveler's weekly item, and AMAN training targets in one Vanacore panel. CatsEye XI only.
 
 Seekey. Daily tracking began in Dewin's Goldilox addon.
 
@@ -14,7 +14,7 @@ The first time a character logs in, Tracker copies that character's `Goldilox-UI
 
 ## Window
 
-The panel lists Goblin Dailies, then Palalumin Quests, then AMAN Targets. A section hides once that work is finished. Each section sits apart from the next, so its rows stay with that header. Hold Shift to drag. The title, the close mark, the frame, the gaps between sections, and a collapsed section header fade out until the mouse is over the window. An open section stays opaque. Then the whole window comes back. The x closes the window until the next AMAN confirm, a restored hunt, or `/tracker ui`.
+The panel lists Goblin Dailies, then Palalumin Quests, then Aether Traveler, then AMAN Targets. A section hides once that work is finished. Each section sits apart from the next, so its rows stay with that header. Hold Shift to drag. The title, the close mark, the frame, the gaps between sections, and a collapsed section header fade out until the mouse is over the window. An open section stays opaque. Then the whole window comes back. The cog left of the x opens a scale slider, 0.5x to 2x. The window takes the new size once the slider is let go, and the size is saved for the character. The x closes the window until the next AMAN confirm, a restored hunt, or `/tracker ui`.
 
 Closing the window is not remembered.
 
@@ -22,7 +22,7 @@ Closing the window is not remembered.
 
 - `/tracker` shows this help
 - `/tracker ui` shows or hides the window
-- `/tracker dailies` prints goblin and Palalumin status
+- `/tracker dailies` prints goblin, Palalumin, and Aether Traveler status
 - `/tracker clear` clears the AMAN regime only
 - `/tracker debug` toggles death-packet logging
 - `/tracker test <name>` checks a mob name against the regime
@@ -32,3 +32,5 @@ Closing the window is not remembered.
 The day rolls at Japanese midnight. That clears the dailies and leaves the AMAN regime alone.
 
 A goblin who says "Congratulations!" has finished that daily. That row leaves the panel. Once every daily is finished and the Goldilox reward is collected, the section hides.
+
+The Aether Traveler in Port Jeuno wants three of one item each week. Hear his weekly special and the item shows under Aether Traveler with how many you carry. Within 3 yalms of him with all three, a Trade button hands them over. Once he keeps them, the row asks "Store Aether Fragments?" with how many his reward added, and its Trade button hands those fragments back to him to keep. Once he keeps them, or they leave your inventory, the section hides. The request is kept until midnight Monday, Japanese time.

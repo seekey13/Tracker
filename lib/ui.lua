@@ -7,9 +7,12 @@ progress. Hold Shift to drag. The title, close mark, frame, and the
 gaps between sections fade out until the mouse is over the window.
 A section header lines up with its rows. An open section stays opaque.
 A collapsed header fades with the frame until the mouse is over the window.
+The cog left of the close mark opens a scale slider, 0.5x to 2x. The
+window takes the new size once the slider is let go.
 ]]
 
 local imgui = require('imgui')
+local settingslib = require('settings')
 local dailies = require('lib.dailies')
 local regime = require('lib.regime')
 local family = require('lib.family')
@@ -18,6 +21,7 @@ local parse = require('lib.daily_parse')
 local ui = {}
 ui.show = { true }
 ui.shift_held = false
+ui.scale_open = false
 
 local HEX = {
     bg = '#161822', border = '#2A2E3E', line = '#242838', well = '#0E1017',
@@ -71,41 +75,35 @@ local function S(n)
     return math.floor(n * scale + 0.5)
 end
 
+-- The slider's scale. It is taken up only while the slider is not held, or
+-- the window would resize and move the slider under the mouse.
+local user_scale = 1
+local SCALE_MIN, SCALE_MAX = 0.5, 2
+
 local function update_scale()
     local h = 1080
     local ok, io = pcall(imgui.GetIO)
     if ok and io and io.DisplaySize then
         h = tonumber(io.DisplaySize.y) or h
     end
-    scale = math.max(0.75, math.min(1.6, h / 1440)) * 1.1
+    scale = math.max(0.75, math.min(1.6, h / 1440)) * 1.1 * user_scale
 end
 
 local BODY, SMALL = 16, 13.5
 local DYNAMIC = (tonumber(IMGUI_VERSION_NUM) or 0) >= 19200
+-- Each face is baked at this size. ImGui before 1.92 draws a face only at
+-- its bake size, so there the window font scale makes up the rest.
+local BAKE_PX = 18
 local fonts = { tried = false, ready = false }
-local fonts_pending = nil
 local measured, measured_scale, measured_n = {}, nil, 0
 
-local function fonts_begin()
-    if fonts_pending then
-        fonts.text = fonts_pending.text
-        fonts.semi = fonts_pending.semi
-        fonts.bold_italic = fonts_pending.bold_italic
-        fonts.semi_italic = fonts_pending.semi_italic
-        fonts_pending = nil
-        fonts.ready = true
-        measured, measured_n = {}, 0
-    end
+-- Segoe UI from Windows, once, from the load event. Adding to the shared
+-- atlas mid-frame can crash. Without segoeui.ttf, ready stays false.
+function ui.bake()
     if fonts.tried then
         return
     end
     fonts.tried = true
-    if not DYNAMIC then
-        local face_now = imgui.GetFont()
-        fonts.text, fonts.semi, fonts.bold_italic, fonts.semi_italic = face_now, face_now, face_now, face_now
-        fonts.ready = true
-        return
-    end
     local dir = ((os.getenv and os.getenv('WINDIR')) or 'C:\\Windows') .. '\\Fonts\\'
     local function add(file, fallback)
         local path = dir .. file
@@ -114,20 +112,72 @@ local function fonts_begin()
             return fallback
         end
         handle:close()
-        local ok, face_now = pcall(imgui.AddFontFromFileTTF, path, 18)
+        local ok, face_now = pcall(imgui.AddFontFromFileTTF, path, BAKE_PX)
         if ok and face_now then
             return face_now
         end
         return fallback
     end
-    local text = add('segoeui.ttf', imgui.GetFont())
+    local text = add('segoeui.ttf')
+    if text == nil then
+        return
+    end
     local semi = add('seguisb.ttf', text)
-    fonts_pending = {
-        text = text,
-        semi = semi,
-        bold_italic = add('segoeuiz.ttf', semi),
-        semi_italic = add('seguisbi.ttf', semi),
-    }
+    fonts.text = text
+    fonts.semi = semi
+    fonts.bold_italic = add('segoeuiz.ttf', semi)
+    fonts.semi_italic = add('seguisbi.ttf', semi)
+    fonts.ready = true
+end
+
+local function face(which)
+    return fonts[which] or imgui.GetFont()
+end
+
+-- The window font scale that stands in for size before 1.92.
+local function scale_for(size)
+    return math.max(0.1, S(size) / BAKE_PX)
+end
+
+-- The window font scale each push replaced, for its pop to put back.
+local scales, window_scale = {}, 1
+
+-- Inside a window only: before 1.92 the size is that window's font scale.
+local function push_font(font, size)
+    if DYNAMIC then
+        imgui.PushFont(font, S(size))
+        return true
+    end
+    if not (fonts.ready and font) then
+        return false
+    end
+    imgui.PushFont(font)
+    scales[#scales + 1] = window_scale
+    window_scale = scale_for(size)
+    imgui.SetWindowFontScale(window_scale)
+    return true
+end
+
+local function pop_font()
+    if not DYNAMIC then
+        window_scale = table.remove(scales) or 1
+        imgui.SetWindowFontScale(window_scale)
+    end
+    imgui.PopFont()
+end
+
+-- Ahead of Begin. Before 1.92 the face goes on now, and its size waits for
+-- Begin to make the window current.
+local function push_window_font(size)
+    if DYNAMIC then
+        imgui.PushFont(face('text'), S(size))
+        return true
+    end
+    if fonts.ready then
+        imgui.PushFont(fonts.text)
+        return true
+    end
+    return false
 end
 
 local function measure(str, font, size)
@@ -138,13 +188,10 @@ local function measure(str, font, size)
     local key = tostring(font) .. '|' .. tostring(size) .. '|' .. str
     local found = measured[key]
     if not found then
-        local w, h
-        if DYNAMIC and fonts.ready and font then
-            imgui.PushFont(font, S(size))
-            w, h = imgui.CalcTextSize(str)
-            imgui.PopFont()
-        else
-            w, h = imgui.CalcTextSize(str)
+        local pushed = push_font(font, size)
+        local w, h = imgui.CalcTextSize(str)
+        if pushed then
+            pop_font()
         end
         found = { w or 0, h or 0 }
         measured[key] = found
@@ -156,15 +203,14 @@ end
 local function text_mid(dl, x, cy, str, hex, font, size, alpha)
     local _, h = measure(str, font, size)
     local y = cy - h / 2
-    if DYNAMIC and fonts.ready then
+    -- Segoe's tall ascent sets text centred by its box low.
+    if fonts.ready then
         y = y - math.floor(h * 0.06 + 0.5)
     end
-    if DYNAMIC and fonts.ready and font then
-        imgui.PushFont(font, S(size))
-        dl:AddText({ x, y }, u32(hex, alpha), str)
-        imgui.PopFont()
-    else
-        dl:AddText({ x, y }, u32(hex, alpha), str)
+    local pushed = push_font(font, size)
+    dl:AddText({ x, y }, u32(hex, alpha), str)
+    if pushed then
+        pop_font()
     end
 end
 
@@ -234,8 +280,12 @@ local function ease(id, target)
     return v
 end
 
-local function face(which)
-    return fonts[which] or imgui.GetFont()
+-- A filled triangle, wound clockwise on screen as ImGui's anti-aliasing expects.
+local function tri(dl, a, b, c, col)
+    if (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]) < 0 then
+        b, c = c, b
+    end
+    dl:AddTriangleFilled(a, b, c, col)
 end
 
 local function glyph(dl, kind, cx, cy, hex, glyph_scale, alpha)
@@ -251,6 +301,22 @@ local function glyph(dl, kind, cx, cy, hex, glyph_scale, alpha)
     elseif kind == 'close' then
         dl:AddLine(p(6, 6), p(18, 18), col, thickness)
         dl:AddLine(p(18, 6), p(6, 18), col, thickness)
+    elseif kind == 'cog' then
+        -- Sidekick3's cog: eight teeth, one straight up, trapezoids from radius
+        -- 7 to 12 round a body of 9. The hole of 4 is the window ground, which
+        -- fades with the cog.
+        dl:AddCircleFilled({ cx, cy }, 9 * k, col, 24)
+        for i = 0, 7 do
+            local a = i * math.pi / 4
+            local dx, dy = math.sin(a), -math.cos(a)
+            local function q(r, w)
+                return { cx + (dx * r - dy * w) * k, cy + (dy * r + dx * w) * k }
+            end
+            local b1, b2, t1, t2 = q(7, -2.8), q(7, 2.8), q(12, -2.2), q(12, 2.2)
+            tri(dl, b1, b2, t2, col)
+            tri(dl, b1, t2, t1, col)
+        end
+        dl:AddCircleFilled({ cx, cy }, 4 * k, u32(HEX.bg, alpha), 24)
     else
         dl:AddLine(p(5, 9), p(12, 16), col, thickness)
         dl:AddLine(p(12, 16), p(19, 9), col, thickness)
@@ -261,6 +327,11 @@ local folded = {}
 -- chrome fades the frame, the title, and the gaps. A section plate stays
 -- opaque: the header and the ground behind its rows do not take the fade.
 local panel = { chrome = 0, hover = false, layered = false, plates = {} }
+
+-- Stock Ashita's ImGui binds no draw-list channels, so a ground cannot slide
+-- under text already drawn. There each ground is painted first: its spot is
+-- the cursor now, and its size is the same piece's size last frame.
+local grounds, grounds_next = {}, {}
 
 local CHROME_PAD_X = 8
 local BAR_PAD_X = 4
@@ -331,9 +402,9 @@ local function draw_section_header(text)
     local t = ease('fold.' .. text, hovered and 1 or 0)
     local dl = imgui.GetWindowDrawList()
     local span = math.max(btn_w, panel.fit_w or 0)
-    -- The section plate paints this when layers are on. This covers the
-    -- header when they are not, with the same rounded top.
-    if not panel.layered then
+    -- The section plate paints this when layers are on, or when last frame
+    -- left its size. This covers the header otherwise.
+    if not panel.layered and not (panel.section_mark and panel.section_mark.painted) then
         fill(dl, x, y, span, h, HEX.bg, S(SECTION_RADIUS), fade)
     end
     local cy = y + h / 2
@@ -360,15 +431,22 @@ local function show_tooltip(text)
     imgui.PushStyleVar(ImGuiStyleVar_WindowRounding, S(4))
     imgui.PushStyleVar(ImGuiStyleVar_PopupRounding, S(4))
     imgui.PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1)
-    local pushed = false
-    if DYNAMIC and fonts.ready and fonts.text then
-        imgui.PushFont(fonts.text, S(SMALL + 0.5))
-        pushed = true
+    local pushed = push_window_font(SMALL + 0.5)
+    -- ImGui 1.80 (stock Ashita) returns nothing here, and 1.92 always returns
+    -- true. The tooltip is open either way. Skipping EndTooltip would pour the
+    -- rest of the window into it.
+    imgui.BeginTooltip()
+    -- Before 1.92 the size is the tooltip window's font scale. Every addon
+    -- shares that window, so the scale goes back to 1 before it closes.
+    local sized = pushed and not DYNAMIC
+    if sized then
+        imgui.SetWindowFontScale(scale_for(SMALL + 0.5))
     end
-    if imgui.BeginTooltip() then
-        imgui.TextUnformatted(text)
-        imgui.EndTooltip()
+    imgui.TextUnformatted(text)
+    if sized then
+        imgui.SetWindowFontScale(1)
     end
+    imgui.EndTooltip()
     if pushed then
         imgui.PopFont()
     end
@@ -377,8 +455,31 @@ local function show_tooltip(text)
 end
 
 -- flush: the meter runs to the well's right edge, so it meets the level text.
+local function paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush)
+    local radius = S(3)
+    -- Wells stay solid. The window frame's fade does not apply here.
+    fill(dl, x1, y1, well_w, row_h, HEX.well, radius, 1)
+    outline(dl, x1, y1, well_w, row_h, HEX.line, radius, 1)
+    if fraction == nil or well_w <= S(8) then
+        return
+    end
+    local mh = math.max(2, S(3))
+    local mx = x1 + S(4)
+    local mw = flush and (well_w - (mx - x1)) or (well_w - S(8))
+    local my = y1 + row_h - S(2) - mh
+    fill(dl, mx, my, mw, mh, HEX.off, mh / 2, 1)
+    local frac = math.max(0, math.min(1, fraction or 0))
+    if frac <= 0 then
+        return
+    end
+    local meter = HEX.amber
+    if bar_color == COLORS.dark_grey then
+        meter = mix(HEX.amber, HEX.off, 0.45)
+    end
+    fill(dl, mx, my, math.max(mh, mw * frac), mh, meter, mh / 2, 1)
+end
+
 local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing, flush)
-    local has_meter = fraction ~= nil
     local pad_y = S(1)
     local dl = imgui.GetWindowDrawList()
     -- outer: the window already split channels, so the well goes on the back
@@ -396,6 +497,16 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
             if split then
                 layer = 'inner'
             end
+        end
+    end
+    local ground_key = nil
+    if layer == nil then
+        panel.section_row = (panel.section_row or 0) + 1
+        ground_key = 'well.' .. tostring(panel.section_key) .. '.' .. panel.section_row
+        local size = grounds[ground_key]
+        if size then
+            local gx, gy = imgui.GetCursorScreenPos()
+            paint_well(dl, gx, gy, size[1], size[2], fraction, bar_color, flush)
         end
     end
 
@@ -418,7 +529,7 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
     end
     imgui.SameLine(0, 0)
     imgui.Dummy({ ROW_PAD_X, 1 })
-    if has_meter then
+    if fraction ~= nil then
         imgui.Dummy({ 0, S(4) })
     end
     if pad_y > 0 then
@@ -437,42 +548,16 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
     end
     local well_w = math.max(row_w, panel.fit_w or 0, zone_w)
 
-    local function paint_back()
-        local radius = S(3)
-        -- Wells stay solid. The window frame's fade does not apply here.
-        fill(dl, x1, y1, well_w, row_h, HEX.well, radius, 1)
-        outline(dl, x1, y1, well_w, row_h, HEX.line, radius, 1)
-        if not has_meter or well_w <= S(8) then
-            return
-        end
-        local mh = math.max(2, S(3))
-        local mx = x1 + S(4)
-        local mw = flush and (well_w - (mx - x1)) or (well_w - S(8))
-        local my = y2 - S(2) - mh
-        fill(dl, mx, my, mw, mh, HEX.off, mh / 2, 1)
-        local frac = math.max(0, math.min(1, fraction or 0))
-        if frac <= 0 then
-            return
-        end
-        local meter = HEX.amber
-        if bar_color == COLORS.dark_grey then
-            meter = mix(HEX.amber, HEX.off, 0.45)
-        end
-        fill(dl, mx, my, math.max(mh, mw * frac), mh, meter, mh / 2, 1)
-    end
-
     if layer == 'outer' then
         pcall(function() dl:ChannelsSetCurrent(1) end)
-        paint_back()
+        paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush)
         pcall(function() dl:ChannelsSetCurrent(2) end)
     elseif layer == 'inner' then
         pcall(function() dl:ChannelsSetCurrent(0) end)
-        paint_back()
+        paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush)
         pcall(function() dl:ChannelsMerge() end)
-    elseif has_meter then
-        local mh = math.max(2, S(3))
-        local my = y2 - S(2) - mh
-        fill(dl, x1, my, well_w, mh, HEX.off, mh / 2, 1)
+    else
+        grounds_next[ground_key] = { well_w, row_h }
     end
     if add_spacing ~= false then
         imgui.Dummy({ 0, S(1) })
@@ -533,64 +618,17 @@ local function pop_window_style()
     imgui.PopStyleColor(style_count)
 end
 
-local function draw_header()
-    local pad = indent_chrome()
-    local h = S(18)
+local function section_begin(title)
     local x, y = imgui.GetCursorScreenPos()
-    imgui.Dummy({ 0, h })
-    local dl = imgui.GetWindowDrawList()
-    local cy = y + h / 2
-    local title_font = face('semi')
-    text_mid(dl, x, cy, 'Tracker', HEX.white, title_font, BODY, panel.chrome)
-    local title_w = measure('Tracker', title_font, BODY)
-
-    local box = S(14) * 1.5
-    local content_left = x - pad
-    local min_span = pad + title_w + S(10) + box + S(6)
-    local span = math.max(panel.fit_w or 0, min_span)
-    local right = content_left + span
-    local close_cx = right - S(6) - box / 2
-
-    local rx, ry = imgui.GetCursorScreenPos()
-    imgui.SetCursorScreenPos({ close_cx - box / 2, cy - box / 2 })
-    imgui.InvisibleButton('##tracker.close', { box, box })
-    local close_hover = imgui.IsItemHovered()
-    if imgui.IsItemClicked(0) then
-        ui.show[1] = false
+    local fade = folded[title] and panel.chrome or 1
+    local mark = { x = x, y = y, fade = fade, key = 'plate.' .. title }
+    panel.section_mark = mark
+    panel.section_key, panel.section_row = title, 0
+    local h = not panel.layered and grounds[mark.key]
+    if h then
+        fill(imgui.GetWindowDrawList(), x, y, panel.fit_w or 0, h, HEX.bg, S(SECTION_RADIUS), fade)
+        mark.painted = (panel.fit_w or 0) > 0
     end
-    imgui.SetCursorScreenPos({ rx, ry })
-
-    local close_color = close_hover and HEX.rose or HEX.dim
-    glyph(dl, 'close', close_cx, cy, close_color, 1.5, panel.chrome)
-    mark_width(close_cx + box / 2 - content_left)
-
-    local rule_y = select(2, imgui.GetCursorScreenPos())
-    local rule_w = math.max(panel.fit_w or 0, close_cx + box / 2 - content_left)
-    dl:AddLine({ content_left, rule_y }, { content_left + rule_w, rule_y }, u32(HEX.border, panel.chrome), 1)
-    imgui.Dummy({ 0, S(2) })
-end
-
-local function section_gap()
-    imgui.Dummy({ 0, S(SECTION_GAP) })
-end
-
-local function begin_layers(dl)
-    panel.plates = {}
-    panel.layered = false
-    panel.section_mark = nil
-    if dl == nil or dl.ChannelsSplit == nil then
-        return
-    end
-    local ok = pcall(function()
-        dl:ChannelsSplit(3)
-        dl:ChannelsSetCurrent(2)
-    end)
-    panel.layered = ok and true or false
-end
-
-local function section_begin()
-    local x, y = imgui.GetCursorScreenPos()
-    panel.section_mark = { x = x, y = y, fade = 1 }
 end
 
 local function section_end()
@@ -607,9 +645,155 @@ local function section_end()
     if y2 <= mark.y then
         return
     end
+    grounds_next[mark.key] = y2 - mark.y
     panel.plates[#panel.plates + 1] = {
         x = mark.x, y = mark.y, y2 = y2, fade = mark.fade or 1,
     }
+end
+
+-- The saved scale, held to the slider's range.
+function ui.scale()
+    local saved = dailies.settings()
+    local n = saved and tonumber(saved.scale) or 1
+    return math.max(SCALE_MIN, math.min(SCALE_MAX, n))
+end
+
+-- Held to the range and to hundredths, as the slider shows it. The slider
+-- saves once it is let go.
+function ui.set_scale(n)
+    local saved = dailies.settings()
+    n = tonumber(n)
+    if saved == nil or n == nil then
+        return false
+    end
+    n = math.max(SCALE_MIN, math.min(SCALE_MAX, n))
+    saved.scale = math.floor(n * 100 + 0.5) / 100
+    return true
+end
+
+-- The scale row under the title. It sits on a plate, so it stays opaque as
+-- an open section does. The value moves with a drag, and the window takes it
+-- up once the slider is let go.
+local function draw_scale_slider()
+    section_begin('Scale')
+    local pad = indent_chrome()
+    imgui.PushStyleColor(ImGuiCol_FrameBg, rgba(HEX.well))
+    imgui.PushStyleColor(ImGuiCol_FrameBgHovered, rgba(HEX.hover))
+    imgui.PushStyleColor(ImGuiCol_FrameBgActive, rgba(HEX.hover))
+    imgui.PushStyleColor(ImGuiCol_SliderGrab, rgba(HEX.teal))
+    imgui.PushStyleColor(ImGuiCol_SliderGrabActive, rgba(HEX.accent2))
+    imgui.BeginGroup()
+    imgui.AlignTextToFramePadding()
+    imgui.TextColored(rgba(HEX.text2), 'Scale')
+    imgui.SameLine(0, S(8))
+    imgui.SetNextItemWidth(S(130))
+    local buf = { ui.scale() }
+    local flags = ImGuiSliderFlags_AlwaysClamp
+    local changed
+    if flags then
+        changed = imgui.SliderFloat('##tracker.scale', buf, SCALE_MIN, SCALE_MAX, '%.2fx', flags)
+    else
+        changed = imgui.SliderFloat('##tracker.scale', buf, SCALE_MIN, SCALE_MAX, '%.2fx')
+    end
+    local hovered = imgui.IsItemHovered()
+    local held = imgui.IsItemActive() and true or false
+    imgui.EndGroup()
+    imgui.PopStyleColor(5)
+    local x1 = select(1, imgui.GetItemRectMin())
+    local x2 = select(1, imgui.GetItemRectMax())
+    mark_width((x2 - x1) + pad)
+    section_end()
+    if changed then
+        ui.set_scale(buf[1])
+    end
+    if panel.scale_held and not held then
+        settingslib.save()
+    end
+    panel.scale_held = held
+    if hovered and not held then
+        show_tooltip('Window size. Taken up once the slider is let go.')
+    end
+end
+
+local function draw_header()
+    local pad = indent_chrome()
+    local h = S(18)
+    local x, y = imgui.GetCursorScreenPos()
+    imgui.Dummy({ 0, h })
+    local dl = imgui.GetWindowDrawList()
+    local cy = y + h / 2
+    local title_font = face('semi')
+    text_mid(dl, x, cy, 'Tracker', HEX.white, title_font, BODY, panel.chrome)
+    local title_w = measure('Tracker', title_font, BODY)
+
+    local box = S(14) * 1.5
+    local gap = S(4)
+    local content_left = x - pad
+    -- Title, a gap, the cog, a gap, the close mark, then S(6) before the content edge.
+    local min_span = pad + title_w + S(10) + box + gap + box + S(6)
+    local span = math.max(panel.fit_w or 0, min_span)
+    local right = content_left + span
+    local close_cx = right - S(6) - box / 2
+    local cog_cx = close_cx - gap - box
+
+    local function hit(id, cx)
+        local rx, ry = imgui.GetCursorScreenPos()
+        imgui.SetCursorScreenPos({ cx - box / 2, cy - box / 2 })
+        imgui.InvisibleButton(id, { box, box })
+        local hovered = imgui.IsItemHovered()
+        local clicked = imgui.IsItemClicked(0)
+        imgui.SetCursorScreenPos({ rx, ry })
+        return hovered, clicked
+    end
+
+    local cog_hover, cog_click = hit('##tracker.cog', cog_cx)
+    if cog_click then
+        ui.scale_open = not ui.scale_open
+    end
+    local cog_color = (cog_hover or ui.scale_open) and HEX.teal or HEX.dim
+    glyph(dl, 'cog', cog_cx, cy, cog_color, 1.1, panel.chrome)
+    if cog_hover then
+        show_tooltip('Scale')
+    end
+
+    local close_hover, close_click = hit('##tracker.close', close_cx)
+    if close_click then
+        ui.show[1] = false
+        ui.scale_open = false
+    end
+    local close_color = close_hover and HEX.rose or HEX.dim
+    glyph(dl, 'close', close_cx, cy, close_color, 1.5, panel.chrome)
+    -- Mark what the header needs, not where the close mark landed. The close
+    -- mark follows fit_w, so its spot would hold a too-wide frame for frames.
+    mark_width(min_span - S(6))
+
+    if ui.scale_open then
+        draw_scale_slider()
+    end
+
+    local rule_y = select(2, imgui.GetCursorScreenPos())
+    local rule_w = math.max(panel.fit_w or 0, close_cx + box / 2 - content_left)
+    dl:AddLine({ content_left, rule_y }, { content_left + rule_w, rule_y }, u32(HEX.border, panel.chrome), 1)
+    imgui.Dummy({ 0, S(2) })
+end
+
+local function section_gap()
+    imgui.Dummy({ 0, S(SECTION_GAP) })
+end
+
+local function begin_layers(dl)
+    panel.plates = {}
+    panel.layered = false
+    panel.section_mark = nil
+    panel.section_key = nil
+    if dl == nil or dl.ChannelsSplit == nil then
+        return
+    end
+    local ok = pcall(function()
+        dl:ChannelsSplit(3)
+        dl:ChannelsSetCurrent(2)
+    end)
+    panel.layered = ok and true or false
 end
 
 -- Drawn on the back channel so row wells and labels stay above it.
@@ -809,6 +993,71 @@ end
 
 local SEA = 'https://discord.com/channels/696847769444548700/1359317001457242192'
 
+local TRADE_LABEL = 'Trade'
+-- Hover text on the gray button when the items are owned but cannot go.
+local TRADE_BLOCKED = {
+    locked = 'Some of these are locked, in your bazaar or equipped.',
+    stacks = 'These take more than 8 stacks. Combine them first.',
+}
+
+local function trade_button_size()
+    local tw, th = imgui.CalcTextSize(TRADE_LABEL)
+    if type(tw) == 'table' then
+        th = tw.y or tw[2] or 0
+        tw = tw.x or tw[1] or 0
+    end
+    tw = tonumber(tw) or 0
+    th = tonumber(th) or 0
+    local pad_x = S(6)
+    local pad_y = S(1)
+    return tw + pad_x * 2, th + pad_y * 2, pad_x, th
+end
+
+-- The hit target is invisible. The face drawn over it is the button, so a
+-- pending or blocked turn-in can go gray without a second widget.
+local function draw_trade_button(npc, state, why)
+    local w, h, pad_x, th = trade_button_size()
+    pcall(imgui.AlignTextToFramePadding)
+    imgui.InvisibleButton('##trade.' .. npc, { w, h })
+    local ready = state == 'ready'
+    local hovered = imgui.IsItemHovered()
+    local hot = ready and hovered
+    local clicked = imgui.IsItemClicked(0)
+    local x1, y1 = imgui.GetItemRectMin()
+    local _, y2 = imgui.GetItemRectMax()
+    local dl = imgui.GetWindowDrawList()
+    local bg = HEX.off
+    local fg = HEX.dim
+    local edge = HEX.faint
+    if ready then
+        bg = hot and HEX.accent or HEX.accent_lo
+        fg = HEX.white
+        edge = HEX.accent
+    end
+    fill(dl, x1, y1, w, h, bg, S(3), 1)
+    outline(dl, x1, y1, w, h, edge, S(3), 1)
+    dl:AddText({ x1 + pad_x, (y1 + y2) / 2 - th / 2 }, u32(fg), TRADE_LABEL)
+    if hot then
+        show_tooltip('Trade to ' .. npc)
+    elseif hovered and state == 'blocked' then
+        show_tooltip(TRADE_BLOCKED[why])
+    end
+    return ready and clicked and true or false
+end
+
+-- With the button, the row's count sits left of it, so the button ends the
+-- row as it does on Palalumin's.
+local function draw_count_trade(npc, needs, count_text, bar_color, offer, why)
+    local gap = S(8)
+    place_after(S(8), piece_w(count_text) + gap + trade_button_size())
+    local hex = (bar_color == COLORS.grey_bar) and HEX.dim or HEX.text2
+    imgui.TextColored(rgba(hex), count_text)
+    imgui.SameLine(0, gap)
+    if draw_trade_button(npc, offer, why) then
+        dailies.trade_start(npc, needs)
+    end
+end
+
 local function draw_goblins(saved)
     local rows = saved.dailies or {}
     local completed = 0
@@ -861,7 +1110,9 @@ local function draw_goblins(saved)
                 local bar_color = has_item and COLORS.grey_bar or COLORS.dark_grey
                 local label_color, highlight_color = progress_colors(has_item)
                 local count_text = have and (tostring(math.min(have, 1)) .. '/1') or '?/1'
-                draw_bar(fraction, count_text, bar_color, function()
+                local needs = { { name = row.item, needed = 1 } }
+                local offer, why = dailies.trade_button('Beetrix', needs)
+                draw_bar(fraction, offer and '' or count_text, bar_color, function()
                     imgui.TextColored(label_color, 'Trade ')
                     imgui.SameLine()
                     draw_item_link(row.item, highlight_color)
@@ -869,6 +1120,9 @@ local function draw_goblins(saved)
                     imgui.TextColored(label_color, ' found at ')
                     imgui.SameLine()
                     draw_zone_link(row.zone, highlight_color)
+                    if offer then
+                        draw_count_trade('Beetrix', needs, count_text, bar_color, offer, why)
+                    end
                 end)
             else
                 local text = dailies.goblin_line(npc, row)
@@ -938,6 +1192,13 @@ local function draw_palalumin(saved)
                     end
                     imgui.SameLine()
                     imgui.TextColored(summary_label, ' ')
+                    local offer, why = dailies.trade_button('Palalumin', items)
+                    if offer then
+                        place_after(S(12), trade_button_size())
+                        if draw_trade_button('Palalumin', offer, why) then
+                            dailies.trade_start('Palalumin', items)
+                        end
+                    end
                 end, false)
             elseif name == 'Defeat mobs' and (row.killed and row.total or row.completed) then
                 local killed = row.killed or 0
@@ -973,6 +1234,46 @@ local function draw_palalumin(saved)
             draw_notice('Quests active', HEX.amber)
         end
     end
+end
+
+-- After the turn-in, he offers to keep the fragments he gave for it.
+local function draw_fragments(fragments)
+    local count_text = 'x' .. fragments
+    local needs = { { id = parse.AETHER_FRAGMENT_ID, needed = fragments } }
+    local offer, why = dailies.trade_button(parse.AETHER_NPC, needs)
+    draw_bar(nil, offer and '' or count_text, nil, function()
+        imgui.TextColored(COLORS.white, 'Store Aether Fragments?')
+        if offer then
+            draw_count_trade(parse.AETHER_NPC, needs, count_text, nil, offer, why)
+        end
+    end)
+end
+
+-- His one request this week: three of one item.
+local function draw_aether(saved)
+    local fragments = dailies.aether_fragments()
+    if fragments then
+        draw_fragments(fragments)
+        return
+    end
+    local item = saved.aether.item
+    local wanted = parse.AETHER_COUNT
+    local have = dailies.item_count(item)
+    local is_done = have ~= nil and have >= wanted
+    local fraction = have and (math.min(have, wanted) / wanted) or 0
+    local bar_color = is_done and COLORS.grey_bar or (have == nil and COLORS.dark_grey or nil)
+    local label_color, highlight_color = progress_colors(is_done)
+    local count_text = (have and tostring(math.min(have, wanted)) or '?') .. '/' .. wanted
+    local needs = { { name = item, needed = wanted } }
+    local offer, why = dailies.trade_button(parse.AETHER_NPC, needs)
+    draw_bar(fraction, offer and '' or count_text, bar_color, function()
+        imgui.TextColored(label_color, 'Trade ')
+        imgui.SameLine()
+        draw_item_link(item, highlight_color)
+        if offer then
+            draw_count_trade(parse.AETHER_NPC, needs, count_text, bar_color, offer, why)
+        end
+    end)
 end
 
 local function draw_regime_line(state)
@@ -1107,6 +1408,14 @@ local function has_pala(saved)
     return known < #dailies.pala_order
 end
 
+local function has_aether(saved)
+    local row = saved.aether
+    if type(row) ~= 'table' or type(row.item) ~= 'string' then
+        return false
+    end
+    return not row.completed or dailies.aether_fragments() ~= nil
+end
+
 local function has_aman()
     local state = regime.view()
     return state.is_active and type(state.enemies) == 'table' and #state.enemies > 0
@@ -1214,20 +1523,24 @@ function ui.render()
         return
     end
 
+    -- The Aether Traveler's section counts fragments to decide if it shows.
+    dailies.begin_frame()
     local show_goblin = has_goblin(saved)
     local show_pala = has_pala(saved)
+    local show_aether = has_aether(saved)
     local show_aman = has_aman()
-    if not show_goblin and not show_pala and not show_aman then
+    if not show_goblin and not show_pala and not show_aether and not show_aman then
         return
     end
 
-    dailies.begin_frame()
+    if not panel.scale_held then
+        user_scale = ui.scale()
+    end
     update_scale()
     tick()
     -- Last frame's hover drives this frame, because the window background is
     -- chosen before Begin. The fade uses that same value for the title.
     panel.chrome = ease('chrome', panel.hover and 1 or 0)
-    fonts_begin()
 
     imgui.SetNextWindowSizeConstraints({ 0, 0 }, { FLT_MAX, FLT_MAX })
     local win_flags = bit.bor(
@@ -1244,12 +1557,15 @@ function ui.render()
     end
 
     push_window_style()
-    local font_pushed = false
-    if DYNAMIC and fonts.ready and fonts.text then
-        imgui.PushFont(fonts.text, S(BODY))
-        font_pushed = true
-    end
+    local font_pushed = push_window_font(BODY)
     if imgui.Begin(LAYOUT_WINDOW, ui.show, win_flags) then
+        if font_pushed and not DYNAMIC then
+            scales, window_scale = {}, scale_for(BODY)
+            imgui.SetWindowFontScale(window_scale)
+        elseif not DYNAMIC then
+            -- No Segoe: the stock face at its own size, times the slider.
+            imgui.SetWindowFontScale(user_scale)
+        end
         local place_x, place_y = imgui.GetWindowPos()
         register_layout(place_x, place_y)
         if imgui.IsWindowHovered then
@@ -1262,7 +1578,7 @@ function ui.render()
         draw_header()
         local shown = false
         if show_goblin then
-            section_begin()
+            section_begin('Goblin Dailies')
             if draw_section_header('Goblin Dailies') then
                 draw_goblins(saved)
             end
@@ -1273,8 +1589,19 @@ function ui.render()
             if shown then
                 section_gap()
             end
-            section_begin()
+            section_begin('Palalumin Quests')
             draw_palalumin(saved)
+            section_end()
+            shown = true
+        end
+        if show_aether then
+            if shown then
+                section_gap()
+            end
+            section_begin('Aether Traveler')
+            if draw_section_header('Aether Traveler') then
+                draw_aether(saved)
+            end
             section_end()
             shown = true
         end
@@ -1282,7 +1609,7 @@ function ui.render()
             if shown then
                 section_gap()
             end
-            section_begin()
+            section_begin('AMAN Targets')
             if draw_section_header('AMAN Targets') then
                 draw_enemies(regime.view())
             end
@@ -1292,6 +1619,7 @@ function ui.render()
             panel.fit_w = panel.fit_now
         end
         paint_plates(layers)
+        grounds, grounds_next = grounds_next, {}
         draw_shadow()
     end
     imgui.End()

@@ -6,6 +6,9 @@ Run: luajit tests\run.lua
 
 local source = (arg and arg[0]) or ''
 local root = source:match('^(.*)[\\/]tests[\\/]run%.lua$')
+if root == nil and source:match('^tests[\\/]run%.lua$') then
+    root = '.'
+end
 if root == nil or root == '' then
     root = 'R:\\CatsEyeXI\\catseyexi-client\\Vanacore\\addons\\ashita\\Tracker'
 end
@@ -177,17 +180,39 @@ local buttons, texts, drawn = {}, {}, {}
 local style_colors, dummies, rects = {}, {}, {}
 local title_alpha = nil
 local began = 0
+local tips, tooltip_depth = {}, 0
+local sequence = {}
 local slider_mode = 'idle'
 local slider_id = nil
+local slider_range = nil
+local circles = 0
 local click_id = nil
+
+-- Fonts the way ImGui keeps them: one stack, and a font scale per window.
+-- Every addon shares the tooltip window.
+local font_stack, font_calls, faces = {}, {}, {}
+local window_scales, in_window, scale_calls, stray_scale = {}, false, 0, 0
+
+local function window_key()
+    return tooltip_depth > 0 and 'tooltip' or 'main'
+end
+
+local function face_now()
+    local top = font_stack[#font_stack]
+    return { top and top.font, window_scales[window_key()] or 1 }
+end
 
 local draw_list = {
     AddLine = function() end,
     AddRect = function() end,
     AddRectFilled = function(_, _, _, col)
         rects[#rects + 1] = col
+        sequence[#sequence + 1] = { 'rect', col }
     end,
     AddTriangleFilled = function() end,
+    AddCircleFilled = function()
+        circles = circles + 1
+    end,
     ChannelsSplit = function() end,
     ChannelsSetCurrent = function() end,
     ChannelsMerge = function() end,
@@ -195,8 +220,12 @@ local draw_list = {
         if str == 'Tracker' and type(col) == 'number' then
             title_alpha = math.floor(col / 16777216)
         end
+        if str == 'Trade' then
+            world.trade_color = col
+        end
         if type(str) == 'string' and #str > 1 then
             drawn[#drawn + 1] = str
+            faces[str] = face_now()
         end
     end,
 }
@@ -224,16 +253,24 @@ local imgui = {
     Spacing = function() end,
     TextColored = function(_, text)
         texts[#texts + 1] = text
+        sequence[#sequence + 1] = { 'text', text }
+        faces[text] = face_now()
     end,
-    TextUnformatted = function() end,
+    TextUnformatted = function(text)
+        if tooltip_depth > 0 then
+            tips[#tips + 1] = text
+            faces[text] = face_now()
+        end
+    end,
     InvisibleButton = function(id)
         buttons[#buttons + 1] = id
+        sequence[#sequence + 1] = { 'button', id }
         if id == click_id then
             world.arm_click = true
         end
     end,
     IsItemHovered = function()
-        return false
+        return world.hover_items and true or false
     end,
     IsItemClicked = function()
         if world.arm_click then
@@ -264,36 +301,59 @@ local imgui = {
     PopStyleColor = function() end,
     PushStyleVar = function() end,
     PopStyleVar = function() end,
-    PushFont = function() end,
-    PopFont = function() end,
-    BeginTooltip = function()
-        return false
+    PushFont = function(font, size)
+        font_stack[#font_stack + 1] = { font = font, size = size }
+        font_calls[#font_calls + 1] = { font, size }
     end,
-    EndTooltip = function() end,
+    PopFont = function()
+        table.remove(font_stack)
+    end,
+    SetWindowFontScale = function(s)
+        scale_calls = scale_calls + 1
+        if not in_window and tooltip_depth == 0 then
+            stray_scale = stray_scale + 1
+        end
+        window_scales[window_key()] = s
+    end,
+    -- Stock Ashita's ImGui 1.80 BeginTooltip returns nothing.
+    BeginTooltip = function()
+        tooltip_depth = tooltip_depth + 1
+    end,
+    EndTooltip = function()
+        tooltip_depth = tooltip_depth - 1
+    end,
     SetNextWindowSizeConstraints = function() end,
     SetNextItemWidth = function() end,
     AlignTextToFramePadding = function() end,
-    SliderInt = function(id, buf)
+    -- slider_mode: 'idle', or a number the drag moves the slider to.
+    SliderFloat = function(id, buf, min, max)
         slider_id = id
-        if slider_mode == 'set25' then
-            buf[1] = 25
+        slider_range = { min, max }
+        if type(slider_mode) == 'number' then
+            buf[1] = slider_mode
             return true
         end
         return false
     end,
+    IsItemActive = function()
+        return world.slider_held and true or false
+    end,
     Begin = function()
         began = began + 1
+        in_window = true
         return true
     end,
-    End = function() end,
+    End = function()
+        in_window = false
+    end,
     GetWindowPos = function()
         return 99, 99
     end,
     GetWindowSize = function()
         return 220, 180
     end,
-    AddFontFromFileTTF = function()
-        return {}
+    AddFontFromFileTTF = function(path, size)
+        return { file = path, size = size }
     end,
 }
 
@@ -584,6 +644,23 @@ name, count = parse.item_need('Gusgen Clay')
 eq(name, 'Gusgen Clay', 'bare item')
 eq(count, 1, 'bare item counts as one')
 
+local written, single = parse.read_aether(
+    'Aether Traveler : Yes... This week I require three dragon bones. Bring them to me and you shall have the fragments.'
+)
+eq(written, 'Dragon Bones', 'aether item as written')
+eq(single, 'Dragon Bone', 'aether item singular')
+written, single = parse.read_aether(
+    '\31\06Aether Traveler : Yes... This week I require 3 rolanberries. Bring them to me and you shall have the fragments.'
+)
+eq(written, 'Rolanberries', 'a digit count and a color byte')
+eq(single, 'Rolanberry', 'ies plural')
+written, single = parse.read_aether('Aether Traveler : This week I require three copper boxes. Bring them to me.')
+eq(single, 'Copper Box', 'es plural')
+written, single = parse.read_aether('Aether Traveler : This week I require three brass ingots. Bring them to me.')
+eq(single, 'Brass Ingot', 'only the last word is plural')
+eq(parse.read_aether('Beetrix : Go to Gusgen Mines, get a Gusgen Clay and trade it to me!'), nil, 'another npc')
+eq(parse.read_aether('Aether Traveler : Welcome, traveler.'), nil, 'other aether talk')
+
 local enemies = parser.parse_enemies('5 Donjon Bats. 2 Kabooms. 3 Members of the Gigas Family.')
 eq(#enemies, 3, 'three enemies')
 eq(enemies[1].name, 'Donjon Bats', 'bats name')
@@ -641,6 +718,7 @@ local dailies = require('lib.dailies')
 local regime = require('lib.regime')
 local ui = require('lib.ui')
 require('lib.packets')
+handlers.load()
 
 eq(addon.name, 'Tracker', 'addon name')
 eq(addon.author, 'Seekey', 'addon author')
@@ -733,6 +811,29 @@ text_in('\129\158 Find flux: The Garden of RuHmet', 9)
 eq(cfg.palalumin_quests['Find flux'].zone, 'Keep', 'reopen does not rewrite the row')
 eq(cfg.palalumin_flagged, true, 'reopen still counts as the menu')
 
+local aether_line = 'Aether Traveler : Yes... This week I require three dragon bones. '
+    .. 'Bring them to me and you shall have the fragments.'
+world.zone = 245
+text_in(aether_line, 9)
+eq(cfg.aether, nil, 'the aether traveler is heard only in Port Jeuno')
+world.zone = 246
+text_in(aether_line, 121)
+eq(cfg.aether, nil, 'his request is npc dialogue')
+text_in(aether_line, 9)
+eq(cfg.aether.item, 'Dragon Bone', 'an item the client does not know is kept singular')
+local week_end = cfg.aether.deadline
+local jst = os.date('!*t', week_end + 32400)
+eq(jst.wday, 2, 'his week ends on a Monday in Japan')
+eq(jst.hour + jst.min + jst.sec, 0, 'his week ends at midnight in Japan')
+truthy(week_end > os.time() and week_end <= os.time() + 7 * 86400, 'his week ends within seven days')
+cfg.aether.completed = true
+text_in(aether_line, 9)
+eq(cfg.aether.completed, true, 'hearing the same special again leaves it done')
+text_in('Aether Traveler : Yes... This week I require three bat wings. Bring them to me and you shall have the fragments.', 9)
+eq(cfg.aether.item, 'Bat Wing', 'a new item replaces the request')
+eq(cfg.aether.completed, nil, 'a new item is open')
+world.zone = 33
+
 cfg.palalumin_quests['Defeat mobs'].completed = nil
 cfg.palalumin_quests['Defeat mobs'].killed = 3
 cfg.palalumin_quests['Defeat mobs'].total = 10
@@ -746,6 +847,12 @@ truthy(printed('Beetrix: '), 'report beetrix')
 truthy(printed('Complete!'), 'report complete')
 truthy(printed('Goldilox: '), 'report reward')
 truthy(printed('Kill 7 more Zdei at Grand Palace of HuXzoi (10 total)'), 'report pala')
+truthy(printed('Aether Traveler: Trade Bat Wing x3'), 'report aether')
+cfg.aether.completed = true
+lines = {}
+dailies.report()
+eq(printed('Aether Traveler'), false, 'a finished request is not reported')
+cfg.aether = nil
 
 local prompt = "A tome has been placed here by the Adventurers' Mutual Aid Network (A.M.A.N.)"
 text_in('Training regime canceled.', 121)
@@ -854,12 +961,16 @@ vana = {
     paths = { install = layout_root },
 }
 
-local function render()
+local function render(target)
     buttons, texts, drawn = {}, {}, {}
     style_colors, dummies, rects = {}, {}, {}
     title_alpha = nil
-    slider_id = nil
-    local ok, err = xpcall(ui.render, debug.traceback)
+    slider_id, slider_range, circles = nil, nil, 0
+    world.trade_color = nil
+    tips, tooltip_depth = {}, 0
+    sequence = {}
+    font_calls, faces, scale_calls, stray_scale = {}, {}, 0, 0
+    local ok, err = xpcall((target or ui).render, debug.traceback)
     if not ok then
         fail('render\n' .. tostring(err))
     end
@@ -870,8 +981,22 @@ local function scaled(n)
     return math.floor(n * s + 0.5)
 end
 
-local function count_gaps()
-    local gap = scaled(12)
+local function is_face(font, file)
+    return type(font) == 'table' and tostring(font.file):lower():sub(-#file - 1) == '\\' .. file
+end
+
+local function sized_pushes()
+    local n = 0
+    for _, call in ipairs(font_calls) do
+        if call[2] ~= nil then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+local function count_gaps(size)
+    local gap = size or scaled(12)
     local n = 0
     for _, size in ipairs(dummies) do
         if size[1] == 0 and size[2] == gap then
@@ -899,6 +1024,25 @@ local function has_rect(col)
     for _, painted in ipairs(rects) do
         if painted == col then
             return true
+        end
+    end
+    return false
+end
+
+-- True when col is among the rects painted just before the named text or
+-- button, with nothing else drawn between them.
+local function laid_under(col, kind, value)
+    for i, event in ipairs(sequence) do
+        if event[1] == kind and event[2] == value then
+            for j = i - 1, 1, -1 do
+                if sequence[j][1] ~= 'rect' then
+                    return false
+                end
+                if sequence[j][2] == col then
+                    return true
+                end
+            end
+            return false
         end
     end
     return false
@@ -952,8 +1096,11 @@ local goblin_i = button_at('##fold.Goblin Dailies')
 local pala_i = button_at('##fold.Palalumin Quests')
 local aman_i = button_at('##fold.AMAN Targets')
 local close_i = button_at('##tracker.close')
-eq(button_at('##tracker.cog'), nil, 'the gear is gone')
+local cog_i = button_at('##tracker.cog')
 truthy(close_i ~= nil, 'close mark is still there')
+truthy(cog_i and close_i and cog_i < close_i, 'the cog is left of the close mark')
+eq(circles, 2, 'the cog is a body and its hole')
+eq(slider_id, nil, 'the scale slider starts closed')
 truthy(goblin_i and pala_i and aman_i and goblin_i < pala_i and pala_i < aman_i, 'section order')
 eq(has_text('Beetrix: Complete!'), false, 'a finished goblin stays off the panel')
 truthy(has_text('Secret chest at '), 'an open goblin stays')
@@ -973,6 +1120,11 @@ eq(count_gaps(), 2, 'a gap sits between each section')
 eq(style_colors[3][4], 0, 'the frame starts clear')
 eq(title_alpha, 0, 'the title starts clear')
 truthy(has_solid_fill(), 'section wells stay solid while the frame is clear')
+truthy(is_face(faces['Secret chest at '][1], 'segoeui.ttf'), 'row text is Segoe UI')
+truthy(is_face(faces['Tracker'][1], 'seguisb.ttf'), 'the title is Segoe UI Semibold')
+truthy(#font_calls > 0 and sized_pushes() == #font_calls, '1.92 pushes every face with its size')
+eq(scale_calls, 0, '1.92 leaves the window font scale alone')
+eq(#font_stack, 0, 'every font push is popped')
 
 local clock = os.clock() + 5
 os.clock = function()
@@ -1007,9 +1159,157 @@ render()
 truthy(has_text('Secret chest at '), 'expanding the section shows its rows')
 eq(has_rect(bg_rect(0)), false, 'an open header stays opaque off the window')
 
+-- The cog opens the scale slider. A drag moves the saved value at once. The
+-- window takes it up, and it is saved, once the slider is let go.
+local function count_rect(col)
+    local n = 0
+    for _, painted in ipairs(rects) do
+        if painted == col then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+eq(cfg.scale, 1, 'scale defaults to 1x')
+eq(ui.scale(), 1, 'the window starts at 1x')
+local opaque_grounds = count_rect(bg_rect(255))
+click_id = '##tracker.cog'
+render()
+eq(ui.scale_open, true, 'the cog opens the scale slider')
+eq(count_rect(bg_rect(255)), opaque_grounds + 1, 'the scale row stays opaque while the frame is clear')
+eq(slider_id, '##tracker.scale', 'the scale slider shows once the cog opens it')
+eq(slider_range and slider_range[1], 0.5, 'the scale slider starts at 0.5x')
+eq(slider_range and slider_range[2], 2, 'the scale slider ends at 2x')
+local saves_before = saves
+world.slider_held = true
+slider_mode = 2
+render()
+eq(cfg.scale, 2, 'a drag sets the scale')
+eq(saves, saves_before, 'a drag does not save')
+render()
+eq(count_gaps(), 2, 'the window keeps its size while the slider is held')
+world.slider_held = false
+slider_mode = 'idle'
+render()
+eq(saves, saves_before + 1, 'letting go saves the scale')
+render()
+eq(count_gaps(math.floor(12 * 1.1 * 2 + 0.5)), 2, 'letting go takes the new scale up')
+truthy(ui.set_scale(9), 'set_scale takes a number')
+eq(cfg.scale, 2, 'scale stops at 2x')
+ui.set_scale(0.1)
+eq(cfg.scale, 0.5, 'scale stops at 0.5x')
+ui.set_scale(1.234)
+eq(cfg.scale, 1.23, 'scale keeps hundredths')
+eq(ui.set_scale('big'), false, 'a word is not a scale')
+cfg.scale = 7
+eq(ui.scale(), 2, 'a saved scale past 2x reads as 2x')
+cfg.scale = 'x'
+eq(ui.scale(), 1, 'a bad saved scale reads as 1x')
+cfg.scale = 1
+click_id = '##tracker.cog'
+render()
+eq(ui.scale_open, false, 'the cog closes the scale slider')
+eq(slider_id, nil, 'a closed scale slider is not drawn')
+eq(count_gaps(), 2, 'the window is back at 1x')
+click_id = '##tracker.cog'
+render()
+click_id = '##tracker.close'
+render()
+eq(ui.show[1], false, 'the x closes the window')
+eq(ui.scale_open, false, 'the x closes the scale slider too')
+ui.show[1] = true
+
+world.hover_items = true
+render()
+eq(tooltip_depth, 0, 'every tooltip closes before the window ends')
+local zone_tip = false
+for _, tip in ipairs(tips) do
+    if tip == 'Open FFXI Wiki: Garlaige Citadel' then
+        zone_tip = true
+    end
+end
+truthy(zone_tip, 'a hovered link shows its tooltip')
+world.hover_items = false
+
+-- ImGui before 1.92 draws a face only at its bake size, so the window font
+-- scale sizes it. This is how Chains draws Segoe there.
+package.loaded['lib.ui'] = nil
+IMGUI_VERSION_NUM = 18000
+local old_ui = require('lib.ui')
+IMGUI_VERSION_NUM = 19223
+package.loaded['lib.ui'] = ui
+old_ui._layout_set = true
+old_ui.bake()
+old_ui.show[1] = true
+render(old_ui)
+render(old_ui)
+local body_scale = scaled(16) / 18
+truthy(is_face(faces['Secret chest at '][1], 'segoeui.ttf'), 'before 1.92 row text is Segoe UI')
+eq(faces['Secret chest at '][2], body_scale, 'before 1.92 the window font scale sizes row text')
+truthy(is_face(faces['Tracker'][1], 'seguisb.ttf'), 'before 1.92 the title is Segoe UI Semibold')
+eq(faces['Tracker'][2], body_scale, 'before 1.92 the title is sized by the window font scale')
+truthy(#font_calls > 0, 'before 1.92 faces are pushed')
+eq(sized_pushes(), 0, 'before 1.92 a face goes on without a size')
+eq(stray_scale, 0, 'before 1.92 the font scale is only set inside a window')
+eq(#font_stack, 0, 'before 1.92 every font push is popped')
+eq(window_scales.main, body_scale, 'before 1.92 the panel ends on its body scale')
+world.hover_items = true
+render(old_ui)
+world.hover_items = false
+local tip_face = faces['Open FFXI Wiki: Garlaige Citadel']
+truthy(tip_face and is_face(tip_face[1], 'segoeui.ttf'), 'before 1.92 a tooltip is Segoe UI')
+eq(tip_face and tip_face[2], scaled(14) / 18, 'before 1.92 the tooltip window font scale sizes it')
+eq(window_scales.tooltip, 1, 'the shared tooltip window goes back to scale 1')
+eq(faces['Secret chest at '][2], body_scale, 'a tooltip leaves the panel on its body scale')
+
+-- Without segoeui.ttf nothing is baked, so the stock face takes the slider.
+package.loaded['lib.ui'] = nil
+IMGUI_VERSION_NUM = 18000
+local bare_ui = require('lib.ui')
+IMGUI_VERSION_NUM = 19223
+package.loaded['lib.ui'] = ui
+bare_ui._layout_set = true
+bare_ui.show[1] = true
+render(bare_ui)
+eq(window_scales.main, 1, 'without Segoe before 1.92 the stock face is at 1x')
+cfg.scale = 2
+render(bare_ui)
+eq(window_scales.main, 2, 'without Segoe before 1.92 the slider scales the stock face')
+eq(sized_pushes(), 0, 'without Segoe before 1.92 no face is pushed with a size')
+cfg.scale = 1
+
+-- Stock Ashita's ImGui binds no draw-list channels.
+local channels_split = draw_list.ChannelsSplit
+draw_list.ChannelsSplit = nil
+render()
+render()
+local well = ((255 * 256 + 0x17) * 256 + 0x10) * 256 + 0x0E
+truthy(laid_under(bg_rect(255), 'button', '##fold.AMAN Targets'), 'without channels the section ground goes down first')
+truthy(laid_under(well, 'text', 'Donjon Bats'), 'without channels a row well goes under its text')
+truthy(laid_under(well, 'text', 'Secret chest at '), 'without channels a static row well goes under its text')
+world.hover = true
+clock = clock + 1
+render()
+clock = clock + 1
+render()
+truthy(laid_under(bg_rect(255), 'button', '##fold.AMAN Targets'), 'without channels the section ground stays opaque on hover')
+world.hover = false
+clock = clock + 1
+render()
+clock = clock + 1
+render()
+ui.scale_open = true
+render()
+render()
+truthy(laid_under(bg_rect(255), 'text', 'Scale'), 'without channels the scale row ground stays opaque')
+ui.scale_open = false
+draw_list.ChannelsSplit = channels_split
+
 cfg.opacity = 40
 cfg.deadline = 0
 cfg.version = 1
+cfg.aether = { item = 'Bat Wing', deadline = os.time() + 3600 }
 local enemy_table = regime.view().enemies
 truthy(dailies.roll_day(), 'a new day rolls')
 eq(cfg.opacity, 40, 'day roll keeps opacity')
@@ -1017,6 +1317,10 @@ eq(regime.view().is_active, true, 'day roll keeps the regime')
 eq(regime.view().enemies, enemy_table, 'day roll keeps the enemy table')
 eq(cfg.dailies.Fishstix, nil, 'day roll clears goblins')
 eq(cfg.palalumin_flagged, false, 'day roll clears palalumin')
+eq(cfg.aether and cfg.aether.item, 'Bat Wing', 'day roll keeps the aether request')
+cfg.aether.deadline = os.time()
+dailies.roll_day()
+eq(cfg.aether, nil, 'the end of his week drops the request')
 cfg.version = 2
 cfg.dailies.Fishstix = { zone = 'X' }
 cfg.opacity = 40
@@ -1038,4 +1342,808 @@ render()
 eq(began, 0, 'a finished day draws nothing')
 
 os.execute('rmdir /s /q "' .. layout_root .. '" >nul 2>&1')
+
+local trade = require('lib.trade')
+
+local function hex_to_bin(text)
+    return (text:gsub('%s', ''):gsub('%x%x', function(byte)
+        return string.char(tonumber(byte, 16))
+    end))
+end
+
+local function packet_matches(packet, hex, why)
+    local want = hex_to_bin(hex)
+    eq(#packet, 64, why .. ' length')
+    local got = packet:sub(5)
+    local body = want:sub(5)
+    eq(#got, #body, why .. ' body length')
+    for i = 1, #body do
+        if got:byte(i) ~= body:byte(i) then
+            eq(got:byte(i), body:byte(i), string.format('%s byte 0x%02X', why, i + 3))
+            return
+        end
+    end
+    eq(true, true, why)
+end
+
+-- The bytes XIIM captured from the client's own 0x036 packets. The first four
+-- are the header Ashita writes, so the body comparison starts at byte 5.
+packet_matches(trade.build_trade(0x010F581D, 0x071D, {
+    { slot = 0x29, count = 10 }, { slot = 0x18, count = 1 },
+    { slot = 0x02, count = 9 }, { slot = 0x0A, count = 3 },
+    { slot = 0x2A, count = 3 }, { slot = 0x47, count = 9 },
+    { slot = 0x1D, count = 12 }, { slot = 0x13, count = 1 },
+}), [[
+    36 20 1C 17 1D 58 0F 01 0A 00 00 00 01 00 00 00
+    09 00 00 00 03 00 00 00 03 00 00 00 09 00 00 00
+    0C 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00
+    29 18 02 0A 2A 47 1D 13 00 00 1D 07 08 00 00 00
+]], '8-entry trade')
+packet_matches(trade.build_trade(0x010F581D, 0x071D, {
+    { slot = 0x44, count = 1 }, { slot = 0x3A, count = 1 }, { slot = 0x0D, count = 1 },
+}), [[
+    36 20 92 1A 1D 58 0F 01 01 00 00 00 01 00 00 00
+    01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+    44 3A 0D 00 00 00 00 00 00 00 1D 07 03 00 00 00
+]], '3-entry trade')
+
+local function read_u32(bytes, index)
+    return bytes[index] + bytes[index + 1] * 256 + bytes[index + 2] * 65536 + bytes[index + 3] * 16777216
+end
+
+local function read_u16(bytes, index)
+    return bytes[index] + bytes[index + 1] * 256
+end
+
+local function rgba_u32(hex)
+    local r = tonumber(hex:sub(2, 3), 16)
+    local g = tonumber(hex:sub(4, 5), 16)
+    local b = tonumber(hex:sub(6, 7), 16)
+    return ((255 * 256 + b) * 256 + g) * 256 + r
+end
+
+local slots = {
+    [0] = { Id = 1001, Count = 99, Flags = 0 },
+    [1] = { Id = 1001, Count = 12, Flags = 0 },
+    [2] = { Id = 1002, Count = 5, Flags = 0 },
+    [3] = { Id = 1003, Count = 9, Flags = 0 },
+    [4] = { Id = 1001, Count = 12, Flags = 1 },
+}
+local max_slot = 80
+-- Palalumin's spot, as mobdb shows it. The player starts on it.
+local SPOT_X, SPOT_Y = -8.61, -357.43
+local actors = {
+    [10] = { name = 'Player', id = 1, flags = 0, dist = 0, status = 0, x = SPOT_X, y = SPOT_Y },
+    [1794] = { name = 'Palalumin', id = 16918530, flags = 0x200, dist = 0.25, status = 0, x = SPOT_X, y = SPOT_Y },
+}
+local captured = {}
+-- Entity names read. A walk of every entity reads 0x900 of them.
+local reads = 0
+local names = {
+    [1001] = 'Phuabo Organ',
+    [1002] = 'Xzomit Organ',
+    [1003] = 'Yovra Organ',
+}
+local old_memory = AshitaCore.GetMemoryManager
+local old_resources = AshitaCore.GetResourceManager
+local old_packets = AshitaCore.GetPacketManager
+
+AshitaCore.GetMemoryManager = function()
+    return {
+        GetPlayer = function()
+            return { GetMainJobLevel = function() return world.level end }
+        end,
+        GetParty = function()
+            return {
+                GetMemberZone = function() return world.zone end,
+                GetMemberTargetIndex = function() return 10 end,
+            }
+        end,
+        GetTarget = function()
+            return {
+                GetIsSubTargetActive = function() return 0 end,
+                GetTargetIndex = function() return 1 end,
+            }
+        end,
+        GetInventory = function()
+            return {
+                GetContainerCountMax = function() return max_slot end,
+                GetContainerItem = function(_, _, slot)
+                    return slots[slot] or { Id = 0, Count = 0, Flags = 0 }
+                end,
+            }
+        end,
+        GetEntity = function()
+            return {
+                GetName = function(_, index)
+                    reads = reads + 1
+                    local actor = actors[index]
+                    return actor and actor.name or ''
+                end,
+                GetLocalPositionX = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.x or 0
+                end,
+                GetLocalPositionY = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.y or 0
+                end,
+                GetServerId = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.id or 0
+                end,
+                GetRenderFlags0 = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.flags or 0
+                end,
+                GetDistance = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.dist or 10000
+                end,
+                GetStatus = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.status or 0
+                end,
+            }
+        end,
+    }
+end
+AshitaCore.GetResourceManager = function()
+    return {
+        GetString = function() return world.zone_name end,
+        GetItemByName = function(_, item_name)
+            if type(item_name) ~= 'string' then
+                return nil
+            end
+            for id, item_name_known in pairs(names) do
+                if item_name_known:lower() == item_name:lower() then
+                    return { Id = id, Name = { item_name_known } }
+                end
+            end
+            return nil
+        end,
+        GetItemById = function(_, id)
+            local item_name = names[id]
+            if not item_name then
+                return nil
+            end
+            return { Id = id, Name = { item_name } }
+        end,
+    }
+end
+AshitaCore.GetPacketManager = function()
+    return {
+        AddOutgoingPacket = function(_, id, data)
+            captured[#captured + 1] = { id = id, data = data }
+        end,
+    }
+end
+
+local needs = {
+    { name = 'Phuabo Organ', needed = 10 },
+    { name = 'Xzomit Organ', needed = 5 },
+}
+local npc = actors[1794]
+
+local function offer()
+    return dailies.trade_button('Palalumin', needs)
+end
+
+clock = 100000
+world.zone = 34
+eq(offer(), 'ready', 'HuXzoi within 3 yalms can trade')
+npc.dist = 9
+eq(offer(), 'ready', '3 yalms is in range')
+npc.dist = 9.01
+eq(offer(), nil, 'past 3 yalms hides the button')
+npc.dist = 36
+eq(offer(), nil, '6 yalms is not close enough')
+npc.dist = 0.25
+-- Each case below waits out the one-second search, so it is the case and not
+-- the wait that hides the button.
+npc.flags = 0
+clock = clock + 1
+eq(offer(), nil, 'an unrendered Palalumin is ignored')
+npc.flags = 0x200
+npc.id = 0
+clock = clock + 1
+eq(offer(), nil, 'a Palalumin with no id is ignored')
+npc.id = 16918530
+local saved_name = npc.name
+npc.name = 'Not Palalumin'
+clock = clock + 1
+eq(offer(), nil, 'a different npc is ignored')
+npc.name = saved_name
+clock = clock + 1
+world.zone = 33
+eq(offer(), nil, 'AlTaieu hides the button')
+world.zone = 35
+eq(offer(), nil, 'RuHmet hides the button')
+world.zone = 245
+eq(offer(), nil, 'Jeuno hides the button')
+world.zone = 34
+eq(offer(), 'ready', 'back in HuXzoi the button returns')
+
+-- Palalumin is only looked for from his spot. Once found, his index is read
+-- each frame, and a walk of every entity runs at most once a second.
+local player = actors[10]
+reads = 0
+offer()
+offer()
+offer()
+eq(reads, 3, 'a found Palalumin is read at his index, not searched for')
+player.x = SPOT_X + 3.01
+reads = 0
+clock = clock + 1
+eq(offer(), nil, 'past 3 yalms east of his spot hides the button')
+eq(reads, 0, 'away from his spot nothing is read')
+player.x = SPOT_X
+player.y = SPOT_Y - 3.01
+eq(offer(), nil, 'past 3 yalms south of his spot hides the button')
+eq(reads, 0, 'south of his spot nothing is read')
+player.x, player.y = SPOT_X + 2.1, SPOT_Y + 2.1
+eq(offer(), 'ready', 'within 3 yalms of his spot can trade')
+player.x, player.y = SPOT_X, SPOT_Y
+npc.name = 'Not Palalumin'
+reads = 0
+eq(offer(), nil, 'a lost Palalumin hides the button')
+truthy(reads >= 0x900, 'a lost Palalumin is searched for')
+reads = 0
+offer()
+clock = clock + 0.5
+offer()
+clock = clock + 0.25
+offer()
+eq(reads, 0, 'the next search waits a second')
+clock = clock + 0.25
+offer()
+truthy(reads >= 0x900, 'a second later it searches again')
+npc.name = saved_name
+clock = clock + 1
+eq(offer(), 'ready', 'a found Palalumin can trade again')
+
+-- Owned items that cannot go gray the button, and it says why.
+local held = slots[1]
+slots[1] = { Id = 1001, Count = 12, Flags = 1 }
+eq(offer(), 'blocked', 'locked stacks gray the button')
+eq(select(2, offer()), 'locked', 'locked stacks are the reason')
+eq(dailies.trade_start('Palalumin', needs), false, 'a locked stack is not traded')
+local spare = slots[4]
+slots[4] = nil
+slots[1] = { Id = 1001, Count = 5, Flags = 1 }
+eq(offer(), nil, 'too few items, locked or not, hide the button')
+slots[1] = { Id = 1001, Count = 4, Flags = 0 }
+eq(offer(), nil, 'slot 0 is not a trade slot')
+slots[4] = spare
+slots[1] = held
+
+-- The row counts what is owned: locked stacks, and slots 1 to the last.
+slots[80] = { Id = 1003, Count = 2, Flags = 0 }
+dailies.begin_frame()
+eq(dailies.item_count('Phuabo Organ'), 24, 'the row skips the gil slot and counts locked stacks')
+eq(dailies.item_count('Yovra Organ'), 11, 'the row counts the last inventory slot')
+slots[80] = nil
+
+local function check_turnin(packet, why)
+    eq(packet.id, 0x36, why .. ' id')
+    local data = packet.data
+    eq(type(data), 'table', why .. ' bytes')
+    eq(#data, 64, why .. ' size')
+    eq(read_u32(data, 5), 16918530, why .. ' npc id')
+    eq(read_u32(data, 9), 10, why .. ' phuabo count')
+    eq(read_u32(data, 13), 5, why .. ' xzomit count')
+    eq(read_u32(data, 17), 0, why .. ' no third stack')
+    eq(data[49], 1, why .. ' first slot')
+    eq(data[50], 2, why .. ' second slot')
+    eq(data[51], 0, why .. ' no third slot')
+    eq(read_u16(data, 59), 1794, why .. ' npc index')
+    eq(data[61], 2, why .. ' entry count')
+end
+
+cfg.palalumin_flagged = true
+cfg.palalumin_quests = {
+    ['Item request'] = {
+        items = 'Phuabo Organ x10, Xzomit Organ x5',
+        message = 'Phuabo Organ x10, Xzomit Organ x5',
+    },
+}
+
+actors[10].status = 4
+truthy(dailies.trade_start('Palalumin', needs), 'queue the turn-in')
+dailies.trade_update()
+eq(#captured, 0, 'no trade while an event is open')
+eq(offer(), 'wait', 'the button waits out the event')
+eq(dailies.trade_start('Palalumin', needs), false, 'a second click does not queue another')
+actors[10].status = 0
+dailies.trade_update()
+eq(#captured, 1, 'one trade once the event ends')
+check_turnin(captured[1], 'turn-in')
+dailies.trade_update()
+eq(#captured, 1, 'the next frame does not trade again')
+
+clock = 100002
+dailies.trade_update()
+eq(#captured, 1, 'two seconds does not finish the wait')
+eq(offer(), 'wait', 'the button stays gray during the wait')
+eq(dailies.trade_start('Palalumin', needs), false, 'three seconds have not elapsed')
+
+clock = 100010
+actors[10].status = 4
+dailies.trade_update()
+eq(#captured, 1, 'the open event still blocks another trade')
+eq(offer(), 'wait', 'the button stays down through the event')
+actors[10].status = 0
+dailies.trade_update()
+eq(offer(), 'ready', 'the button returns after the event and the delay')
+truthy(dailies.trade_start('Palalumin', needs), 'a later turn-in is allowed')
+dailies.trade_update()
+eq(#captured, 2, 'the later turn-in is a single packet')
+check_turnin(captured[2], 'second turn-in')
+clock = 100012
+eq(dailies.trade_start('Palalumin', needs), false, 'the next trade waits three seconds')
+dailies.trade_update()
+eq(#captured, 2, 'no packet during that delay')
+
+local saved_count = slots[1].Count
+clock = 100020
+trade.cancel()
+truthy(dailies.trade_start('Palalumin', needs), 'queue a stack that then changes')
+slots[1].Count = 3
+dailies.trade_update()
+eq(#captured, 2, 'a short stack is not traded')
+eq(offer(), 'blocked', 'a locked stack that covers the shortfall grays the button')
+local spare_lock = slots[4]
+slots[4] = nil
+eq(offer(), nil, 'the button hides once the items are short')
+slots[4] = spare_lock
+slots[1].Count = saved_count
+
+local original_slots = {
+    [0] = slots[0],
+    [1] = slots[1],
+    [2] = slots[2],
+    [3] = slots[3],
+    [4] = slots[4],
+}
+local holder = { slots = original_slots, max_slot = 80 }
+AshitaCore.GetMemoryManager = function()
+    return {
+        GetPlayer = function()
+            return { GetMainJobLevel = function() return world.level end }
+        end,
+        GetParty = function()
+            return {
+                GetMemberZone = function() return world.zone end,
+                GetMemberTargetIndex = function() return 10 end,
+            }
+        end,
+        GetTarget = function()
+            return {
+                GetIsSubTargetActive = function() return 0 end,
+                GetTargetIndex = function() return 1 end,
+            }
+        end,
+        GetInventory = function()
+            return {
+                GetContainerCountMax = function() return holder.max_slot end,
+                GetContainerItem = function(_, _, slot)
+                    return holder.slots[slot] or { Id = 0, Count = 0, Flags = 0 }
+                end,
+            }
+        end,
+        GetEntity = function()
+            return {
+                GetName = function(_, index)
+                    reads = reads + 1
+                    local actor = actors[index]
+                    return actor and actor.name or ''
+                end,
+                GetLocalPositionX = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.x or 0
+                end,
+                GetLocalPositionY = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.y or 0
+                end,
+                GetServerId = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.id or 0
+                end,
+                GetRenderFlags0 = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.flags or 0
+                end,
+                GetDistance = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.dist or 10000
+                end,
+                GetStatus = function(_, index)
+                    local actor = actors[index]
+                    return actor and actor.status or 0
+                end,
+            }
+        end,
+    }
+end
+
+holder.max_slot = 9
+holder.slots = {}
+for slot = 1, 9 do
+    holder.slots[slot] = { Id = 1001, Count = 1, Flags = 0 }
+end
+local nine_state, nine_why = dailies.trade_button('Palalumin', { { name = 'Phuabo Organ', needed = 9 } })
+eq(nine_state, 'blocked', 'nine stacks gray the button')
+eq(nine_why, 'stacks', 'nine stacks do not fit one trade')
+eq(dailies.trade_start('Palalumin', { { name = 'Phuabo Organ', needed = 9 } }), false, 'nine stacks are not sent')
+eq(#captured, 2, 'a refused trade sends nothing')
+holder.max_slot = 8
+holder.slots[9] = nil
+clock = clock + 3
+truthy(dailies.trade_start('Palalumin', { { name = 'Phuabo Organ', needed = 8 } }), 'eight stacks fit one trade')
+dailies.trade_update()
+eq(#captured, 3, 'eight stacks are one packet')
+eq(captured[3].data[61], 8, 'eight entries')
+for i = 1, 8 do
+    eq(captured[3].data[48 + i], i, 'eight-stack slot ' .. i)
+    eq(read_u32(captured[3].data, 9 + (i - 1) * 4), 1, 'eight-stack count ' .. i)
+end
+
+holder.slots = original_slots
+holder.max_slot = 80
+clock = clock + 3
+trade.cancel()
+cfg.palalumin_flagged = true
+cfg.palalumin_quests = {
+    ['Item request'] = {
+        items = 'Phuabo Organ x10, Xzomit Organ x5',
+        message = 'Phuabo Organ x10, Xzomit Organ x5',
+    },
+}
+cfg.dailies = {}
+ui.show[1] = true
+world.level = 75
+world.zone = 34
+npc.dist = 0.25
+npc.flags = 0x200
+npc.id = 16918530
+actors[10].status = 0
+
+render()
+truthy(has_drawn('Trade'), 'the row shows Trade')
+eq(world.trade_color, rgba_u32('#FFFFFF'), 'the trade button is lit')
+local trade_i = button_at('##trade.Palalumin')
+local pala_header = button_at('##fold.Palalumin Quests')
+truthy(trade_i and pala_header and pala_header < trade_i, 'the trade button is on the palalumin row')
+
+holder.slots[2].Count = 0
+render()
+eq(button_at('##trade.Palalumin'), nil, 'missing items hide the button')
+eq(world.trade_color, nil, 'missing items draw no label')
+holder.slots[2].Count = 5
+
+world.zone = 33
+render()
+eq(button_at('##trade.Palalumin'), nil, 'the button is not drawn outside HuXzoi')
+world.zone = 34
+npc.dist = 36
+render()
+eq(button_at('##trade.Palalumin'), nil, 'the button is not drawn out of range')
+npc.dist = 0.25
+render()
+eq(world.trade_color, rgba_u32('#FFFFFF'), 'the button returns in range')
+
+local spare_xzomit = holder.slots[2]
+holder.slots[2] = { Id = 1002, Count = 5, Flags = 19 }
+world.hover_items = true
+render()
+world.hover_items = false
+eq(world.trade_color, rgba_u32('#7B8095'), 'a locked stack grays the trade button')
+local locked_tip = false
+for _, tip in ipairs(tips) do
+    if tip == 'Some of these are locked, in your bazaar or equipped.' then
+        locked_tip = true
+    end
+end
+truthy(locked_tip, 'the gray button says the stack is locked')
+holder.slots[2] = spare_xzomit
+
+cfg.palalumin_quests['Item request'].completed = true
+eq(dailies.trade_start('Palalumin', needs), false, 'a finished request is not traded')
+cfg.palalumin_quests['Item request'].completed = nil
+
+click_id = '##trade.Palalumin'
+render()
+eq(offer(), 'wait', 'the click leaves the turn-in pending')
+render()
+eq(world.trade_color, rgba_u32('#7B8095'), 'a pending trade button is gray')
+local sent_before = #captured
+handlers.d3d_present()
+eq(#captured, sent_before + 1, 'present sends the one queued trade')
+check_turnin(captured[#captured], 'row trade')
+handlers.d3d_present()
+eq(#captured, sent_before + 1, 'present does not send a second trade')
+click_id = '##trade.Palalumin'
+render()
+eq(world.trade_color, rgba_u32('#7B8095'), 'the gray button stays gray')
+handlers.d3d_present()
+eq(#captured, sent_before + 1, 'clicking the gray button does not trade')
+
+clock = clock + 3
+actors[10].status = 0
+dailies.trade_update()
+world.target = 'Palalumin'
+text_in('Quest Completed', 121)
+cfg.palalumin_quests['Item request'].completed = nil
+truthy(dailies.trade_start('Palalumin', needs), 'queue the completion trade')
+dailies.trade_update()
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'sending does not finish the quest by itself')
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, true, 'the issued trade completes the item request')
+
+-- A click does not target Palalumin, and his line still closes the row.
+world.target = nil
+clock = clock + 3
+dailies.trade_update()
+cfg.palalumin_quests['Item request'].completed = nil
+truthy(dailies.trade_start('Palalumin', needs), 'queue a turn-in with nothing targeted')
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, true, 'a button turn-in completes the request with nothing targeted')
+cfg.palalumin_quests['Item request'].completed = nil
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'the next line with nothing targeted leaves the request open')
+
+-- Without any chat line: items he hands back leave the request open, and
+-- items he keeps complete it, so its row leaves the panel.
+clock = clock + 3
+dailies.trade_update()
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'items he hands back leave the request open')
+truthy(dailies.trade_start('Palalumin', needs), 'queue a turn-in he keeps')
+dailies.trade_update()
+local phuabo, xzomit = holder.slots[1], holder.slots[2]
+holder.slots[1] = { Id = 1001, Count = 2, Flags = 0 }
+holder.slots[2] = nil
+actors[10].status = 4
+clock = clock + 3
+dailies.trade_update()
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'the request stays open through his event')
+actors[10].status = 0
+local saves_before_kept = saves
+dailies.trade_update()
+eq(cfg.palalumin_quests['Item request'].completed, true, 'items he kept complete the request')
+eq(saves, saves_before_kept + 1, 'the completed request is saved')
+render()
+eq(has_text('Phuabo Organ'), false, 'a completed request leaves the panel')
+eq(button_at('##trade.Palalumin'), nil, 'a completed request has no trade button')
+holder.slots[1], holder.slots[2] = phuabo, xzomit
+
+-- Beetrix takes his one item in Lower Jeuno, from his own spot.
+local BEETRIX_X, BEETRIX_Y = -50.75, -56.37
+names[1004] = 'Gusgen Clay'
+holder.slots[5] = { Id = 1004, Count = 3, Flags = 0 }
+actors[1830] = { name = 'Beetrix', id = 17782822, flags = 0x200, dist = 0.25, status = 0, x = BEETRIX_X, y = BEETRIX_Y }
+local beetrix = actors[1830]
+local clay = { { name = 'Gusgen Clay', needed = 1 } }
+local function beetrix_offer()
+    return dailies.trade_button('Beetrix', clay)
+end
+cfg.dailies = {
+    Beetrix = {
+        message = 'Go to Gusgen Mines, get a Gusgen Clay and trade it to me!',
+        item = 'Gusgen Clay',
+        zone = 'Gusgen Mines',
+    },
+}
+-- The Palalumin turn-in above saw no "Quest Completed". This one disarms it.
+world.target = nil
+text_in('Quest Completed', 121)
+cfg.palalumin_quests['Item request'].completed = nil
+clock = clock + 3
+dailies.trade_update()
+
+eq(beetrix_offer(), nil, 'Beetrix is not looked for in HuXzoi')
+eq(offer(), 'ready', 'Palalumin still trades in HuXzoi')
+world.zone = 245
+player.x, player.y = BEETRIX_X, BEETRIX_Y
+eq(beetrix_offer(), 'ready', 'Lower Jeuno at his spot can trade')
+eq(offer(), nil, 'Palalumin is not looked for in Lower Jeuno')
+player.x = BEETRIX_X + 3.01
+eq(beetrix_offer(), nil, 'past 3 yalms of his spot hides the button')
+player.x = BEETRIX_X
+beetrix.dist = 9.01
+eq(beetrix_offer(), nil, 'Beetrix past 3 yalms hides the button')
+beetrix.dist = 0.25
+
+render()
+local beetrix_i = button_at('##trade.Beetrix')
+local goblin_header = button_at('##fold.Goblin Dailies')
+truthy(beetrix_i and goblin_header and goblin_header < beetrix_i, 'the trade button is on the goblin row')
+eq(button_at('##trade.Palalumin'), nil, 'no Palalumin button in Lower Jeuno')
+truthy(has_text('1/1'), 'the row keeps its count beside the button')
+eq(world.trade_color, rgba_u32('#FFFFFF'), 'the Beetrix button is lit')
+
+holder.slots[5].Flags = 1
+eq(beetrix_offer(), 'blocked', 'a locked item grays the button')
+eq(dailies.trade_start('Beetrix', clay), false, 'a locked item is not traded')
+holder.slots[5].Flags = 0
+cfg.dailies.Beetrix.status = 'complete'
+eq(dailies.trade_start('Beetrix', clay), false, 'a finished daily is not traded')
+cfg.dailies.Beetrix.status = nil
+
+click_id = '##trade.Beetrix'
+render()
+eq(beetrix_offer(), 'wait', 'the click leaves the turn-in pending')
+eq(offer(), nil, 'the pending turn-in does not gray the Palalumin row')
+local beetrix_sent = #captured
+handlers.d3d_present()
+eq(#captured, beetrix_sent + 1, 'present sends the one queued trade')
+local beetrix_packet = captured[#captured]
+eq(beetrix_packet.id, 0x36, 'beetrix packet id')
+eq(read_u32(beetrix_packet.data, 5), 17782822, 'beetrix npc id')
+eq(read_u32(beetrix_packet.data, 9), 1, 'one item from the stack of three')
+eq(read_u32(beetrix_packet.data, 13), 0, 'no second stack')
+eq(beetrix_packet.data[49], 5, 'beetrix slot')
+eq(read_u16(beetrix_packet.data, 59), 1830, 'beetrix npc index')
+eq(beetrix_packet.data[61], 1, 'beetrix entry count')
+handlers.d3d_present()
+eq(#captured, beetrix_sent + 1, 'present does not send a second trade')
+
+-- His turn-in does not arm Palalumin's "Quest Completed".
+world.target = nil
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'a Beetrix turn-in leaves the Palalumin request open')
+
+clock = clock + 3
+dailies.trade_update()
+eq(dailies.is_complete(cfg.dailies.Beetrix), false, 'an item he hands back leaves the daily open')
+truthy(dailies.trade_start('Beetrix', clay), 'queue a turn-in he keeps')
+dailies.trade_update()
+holder.slots[5] = { Id = 1004, Count = 2, Flags = 0 }
+clock = clock + 3
+local saves_before_beetrix = saves
+dailies.trade_update()
+eq(cfg.dailies.Beetrix.status, 'complete', 'the item he kept completes the daily')
+eq(saves, saves_before_beetrix + 1, 'the completed daily is saved')
+render()
+eq(button_at('##trade.Beetrix'), nil, 'a completed daily has no trade button')
+eq(has_text('Gusgen Clay'), false, 'a completed daily leaves the panel')
+holder.slots[5] = nil
+actors[1830] = nil
+world.zone = 34
+player.x, player.y = SPOT_X, SPOT_Y
+
+-- The Aether Traveler takes three of his week's item in Port Jeuno, from his own spot.
+local AETHER_X, AETHER_Y = -160.34, 90.87
+names[1005] = 'Dragon Bone'
+names[1006] = 'Wyvern Scales'
+actors[1792] = { name = 'Aether Traveler', id = 17786880, flags = 0x200, dist = 0.25, status = 0, x = AETHER_X, y = AETHER_Y }
+local traveler = actors[1792]
+local bones = { { name = 'Dragon Bone', needed = 3 } }
+local function aether_offer()
+    return dailies.trade_button('Aether Traveler', bones)
+end
+
+world.zone = 246
+text_in('Aether Traveler : Yes... This week I require three wyvern scales. Bring them to me and you shall have the fragments.', 9)
+eq(cfg.aether.item, 'Wyvern Scales', 'an item the client knows as written keeps that name')
+text_in('Aether Traveler : Yes... This week I require three dragon bones. Bring them to me and you shall have the fragments.', 9)
+eq(cfg.aether.item, 'Dragon Bone', 'otherwise the singular names the item')
+
+holder.slots[6] = { Id = 1005, Count = 2, Flags = 0 }
+player.x, player.y = AETHER_X, AETHER_Y
+clock = clock + 3
+eq(aether_offer(), nil, 'two of three hide the button')
+render()
+local aether_header = button_at('##fold.Aether Traveler')
+local pala_fold = button_at('##fold.Palalumin Quests')
+truthy(aether_header and pala_fold and pala_fold < aether_header, 'the aether traveler section follows palalumin')
+truthy(has_text('2/3'), 'the row counts what is carried of three')
+eq(button_at('##trade.Aether Traveler'), nil, 'two of three draw no button')
+
+holder.slots[7] = { Id = 1005, Count = 5, Flags = 0 }
+eq(aether_offer(), 'ready', 'Port Jeuno at his spot with three can trade')
+eq(beetrix_offer(), nil, 'Beetrix is not looked for in Port Jeuno')
+world.zone = 245
+player.x, player.y = BEETRIX_X, BEETRIX_Y
+eq(aether_offer(), nil, 'the aether traveler is not looked for in Lower Jeuno')
+world.zone = 246
+player.x, player.y = AETHER_X + 3.01, AETHER_Y
+eq(aether_offer(), nil, 'past 3 yalms of his spot hides the button')
+player.x = AETHER_X
+traveler.dist = 9.01
+eq(aether_offer(), nil, 'the aether traveler past 3 yalms hides the button')
+traveler.dist = 0.25
+
+render()
+truthy(button_at('##trade.Aether Traveler'), 'the trade button is on his row')
+truthy(has_text('3/3'), 'the row keeps its count beside the button')
+eq(world.trade_color, rgba_u32('#FFFFFF'), 'the aether traveler button is lit')
+
+-- Two fragments are already carried. His reward stacks three more on them.
+-- They are found by id 2999 alone: the client's name for them is never asked.
+holder.slots[8] = { Id = 2999, Count = 2, Flags = 0 }
+click_id = '##trade.Aether Traveler'
+render()
+eq(aether_offer(), 'wait', 'the click leaves his turn-in pending')
+local aether_sent = #captured
+handlers.d3d_present()
+eq(#captured, aether_sent + 1, 'present sends his one queued trade')
+local aether_packet = captured[#captured]
+eq(aether_packet.id, 0x36, 'aether traveler packet id')
+eq(read_u32(aether_packet.data, 5), 17786880, 'aether traveler npc id')
+eq(read_u32(aether_packet.data, 9), 2, 'the whole first stack')
+eq(read_u32(aether_packet.data, 13), 1, 'one from the second stack')
+eq(read_u32(aether_packet.data, 17), 0, 'no third stack')
+eq(aether_packet.data[49], 6, 'first aether traveler slot')
+eq(aether_packet.data[50], 7, 'second aether traveler slot')
+eq(read_u16(aether_packet.data, 59), 1792, 'aether traveler npc index')
+eq(aether_packet.data[61], 2, 'aether traveler entry count')
+
+holder.slots[6] = nil
+holder.slots[7] = { Id = 1005, Count = 4, Flags = 0 }
+holder.slots[8].Count = 5
+clock = clock + 3
+local saves_before_aether = saves
+dailies.trade_update()
+eq(cfg.aether.completed, true, 'the items he kept complete the request')
+eq(cfg.aether.fragments_before, 2, 'the fragments carried before his turn-in are noted')
+eq(saves, saves_before_aether + 1, 'the completed request is saved')
+dailies.begin_frame()
+eq(dailies.aether_fragments(), 3, 'his reward is what is offered for storing')
+
+-- He offers to keep the fragments he just gave.
+render()
+truthy(button_at('##fold.Aether Traveler'), 'the section stays to store his fragments')
+truthy(has_text('Store Aether Fragments?'), 'the row offers to store the fragments')
+truthy(has_text('x3'), 'the row counts only the fragments he gave')
+eq(has_text('Dragon Bone'), false, 'the finished request leaves the row')
+truthy(button_at('##trade.Aether Traveler'), 'the fragments can be traded at his spot')
+eq(world.trade_color, rgba_u32('#FFFFFF'), 'the store button is lit')
+lines = {}
+dailies.report()
+truthy(printed('Aether Traveler: Store Aether Fragments? x3'), 'report the fragments to store')
+
+player.x = AETHER_X + 3.01
+render()
+truthy(has_text('Store Aether Fragments?'), 'away from his spot the offer stays')
+eq(button_at('##trade.Aether Traveler'), nil, 'away from his spot the offer has no button')
+player.x = AETHER_X
+holder.slots[8].Count = 2
+render()
+eq(button_at('##fold.Aether Traveler'), nil, 'with his fragments gone the section hides')
+holder.slots[8].Count = 5
+
+click_id = '##trade.Aether Traveler'
+render()
+local store_sent = #captured
+handlers.d3d_present()
+eq(#captured, store_sent + 1, 'present sends the fragments')
+local store_packet = captured[#captured]
+eq(read_u32(store_packet.data, 5), 17786880, 'the fragments go to him')
+eq(read_u32(store_packet.data, 9), 3, 'only the fragments he gave are sent')
+eq(store_packet.data[49], 8, 'fragment slot')
+eq(store_packet.data[61], 1, 'one fragment entry')
+eq(cfg.aether.fragments_before, 2, 'sending the fragments keeps the note')
+
+holder.slots[8].Count = 2
+clock = clock + 3
+dailies.trade_update()
+eq(cfg.aether.fragments_before, nil, 'the fragments he kept close the offer')
+eq(cfg.aether.completed, true, 'storing leaves the request done')
+holder.slots[8].Count = 5
+render()
+eq(button_at('##fold.Aether Traveler'), nil, 'stored fragments hide the section')
+eq(button_at('##trade.Aether Traveler'), nil, 'stored fragments have no trade button')
+holder.slots[7] = nil
+holder.slots[8] = nil
+actors[1792] = nil
+cfg.aether = nil
+world.zone = 34
+player.x, player.y = SPOT_X, SPOT_Y
+
+AshitaCore.GetMemoryManager = old_memory
+AshitaCore.GetResourceManager = old_resources
+AshitaCore.GetPacketManager = old_packets
 finish()
