@@ -116,8 +116,16 @@ AshitaCore = {
             GetInventory = function()
                 return nil
             end,
+            -- world.npcs names entities by index, for a trade's recipient.
             GetEntity = function()
-                return nil
+                if world.npcs == nil then
+                    return nil
+                end
+                return {
+                    GetName = function(_, index)
+                        return world.npcs[index] or ''
+                    end,
+                }
             end,
         }
     end,
@@ -414,6 +422,11 @@ local function text_in(message, mode, injected)
         mode = mode or 0,
         injected = injected or false,
     })
+end
+
+-- A 64-byte 0x036 that only names the npc index, at bytes 59-60.
+local function trade_packet(index)
+    return string.rep('\0', 58) .. string.char(index % 256, math.floor(index / 256)) .. string.rep('\0', 4)
 end
 
 local function has_text(fragment)
@@ -787,18 +800,31 @@ eq(cfg.palalumin_quests['Defeat mobs'].killed, 3, 'defeat stored')
 text_in('Defeat Mobs 5/10 (Zdei in Grand Palace of HuXzoi)', 121)
 eq(cfg.palalumin_quests['Defeat mobs'].killed, 5, 'system updates the kill count')
 
-handlers.packet_out({ id = 0x0036 })
+world.npcs = { [1794] = 'Palalumin', [600] = 'Junknix' }
+-- A trade to anyone else, as XIIM selling to Junknix, is not his turn-in.
+handlers.packet_out({ id = 0x0036, data = trade_packet(600) })
 world.target = 'Palalumin'
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'a trade to another npc leaves the item request open')
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
 text_in('Quest Completed', 121)
 eq(cfg.palalumin_quests['Item request'].completed, true, 'trade completes the item request')
 eq(cfg.palalumin_quests['Defeat mobs'].completed, nil, 'kills short of the total stay open')
 
+-- His line for the kills, with an old trade elsewhere, leaves the items open.
 cfg.palalumin_quests['Defeat mobs'].killed = 10
 cfg.palalumin_quests['Item request'].completed = nil
-handlers.packet_out({ id = 0x0036 })
+handlers.packet_out({ id = 0x0036, data = trade_packet(600) })
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Defeat mobs'].completed, true, 'his line completes satisfied kills')
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'his line for the kills leaves the items open')
+
+cfg.palalumin_quests['Defeat mobs'].completed = nil
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
 text_in('Quest Completed', 121)
 eq(cfg.palalumin_quests['Defeat mobs'].completed, true, 'satisfied kills complete')
 eq(cfg.palalumin_quests['Item request'].completed, true, 'same turn-in completes the items')
+world.npcs = nil
 
 cfg.palalumin_quests['Find flux'].completed = nil
 world.target = 'Lumorian Flux'
@@ -1919,6 +1945,29 @@ eq(has_text('Phuabo Organ'), false, 'a completed request leaves the panel')
 eq(button_at('##trade.Palalumin'), nil, 'a completed request has no trade button')
 holder.slots[1], holder.slots[2] = phuabo, xzomit
 
+-- The button turn-in above saw no "Quest Completed". This one disarms it.
+world.target = 'Palalumin'
+text_in('Quest Completed', 121)
+cfg.palalumin_quests['Item request'].completed = nil
+
+-- A hand trade counts through the event it starts and ten seconds past it.
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
+actors[10].status = 4
+clock = clock + 30
+dailies.trade_update()
+actors[10].status = 0
+clock = clock + 9
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, true, 'his line after a long event completes a hand trade')
+cfg.palalumin_quests['Item request'].completed = nil
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
+clock = clock + 11
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'his line long after a hand trade leaves the request open')
+world.target = nil
+
 -- Beetrix takes his one item in Lower Jeuno, from his own spot.
 local BEETRIX_X, BEETRIX_Y = -50.75, -56.37
 names[1004] = 'Gusgen Clay'
@@ -1936,10 +1985,6 @@ cfg.dailies = {
         zone = 'Gusgen Mines',
     },
 }
--- The Palalumin turn-in above saw no "Quest Completed". This one disarms it.
-world.target = nil
-text_in('Quest Completed', 121)
-cfg.palalumin_quests['Item request'].completed = nil
 clock = clock + 3
 dailies.trade_update()
 

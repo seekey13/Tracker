@@ -18,10 +18,12 @@ dailies.order = P.GOBLIN_ORDER
 dailies.pala_order = P.PALALUMIN_ORDER
 
 local cfg
-local recent_trade = false
--- The button sends to Palalumin whatever the player has targeted. A turn-in
--- to Beetrix leaves this alone.
-local button_trade = false
+-- When this character last traded to Palalumin, by hand or with the button.
+-- His "Quest Completed" closes the item request only through the event that
+-- trade starts and PALA_TRADE_WINDOW seconds past it. A trade to anyone
+-- else, his line for the kills, or a party member's line does not.
+local pala_trade_at = nil
+local PALA_TRADE_WINDOW = 10
 -- Aether Fragments carried when the week's items went to the Aether Traveler.
 local fragments_before = nil
 local counts = nil
@@ -184,6 +186,22 @@ local function target_name()
     return ent.Name
 end
 
+-- True while this character's last trade to Palalumin can still be what his
+-- "Quest Completed" is for. Runs every frame, so a long event keeps it.
+local function pala_traded()
+    if pala_trade_at == nil then
+        return false
+    end
+    local now = os.clock()
+    if trade.in_event() then
+        pala_trade_at = now
+    elseif now - pala_trade_at > PALA_TRADE_WINDOW then
+        pala_trade_at = nil
+        return false
+    end
+    return true
+end
+
 local function apply_system(event)
     if event.kind == 'return' then
         local row = cfg.dailies[event.npc]
@@ -238,22 +256,26 @@ local function apply_system(event)
                 row.completed = true
                 save()
             end
-        elseif name == 'Palalumin' or button_trade then
-            local defeat = cfg.palalumin_quests['Defeat mobs']
-            if defeat and not defeat.completed and defeat.killed and defeat.total and defeat.killed >= defeat.total then
-                defeat.completed = true
-                save()
-            end
-            if recent_trade then
-                local item_req = cfg.palalumin_quests['Item request']
-                if item_req and not item_req.completed then
-                    item_req.completed = true
+        else
+            -- A button click leaves Palalumin untargeted, so a recent trade
+            -- to him stands in for the target.
+            local traded = pala_traded()
+            if name == 'Palalumin' or traded then
+                local defeat = cfg.palalumin_quests['Defeat mobs']
+                if defeat and not defeat.completed and defeat.killed and defeat.total and defeat.killed >= defeat.total then
+                    defeat.completed = true
                     save()
+                end
+                if traded then
+                    local item_req = cfg.palalumin_quests['Item request']
+                    if item_req and not item_req.completed then
+                        item_req.completed = true
+                        save()
+                    end
                 end
             end
         end
-        recent_trade = false
-        button_trade = false
+        pala_trade_at = nil
         return
     end
     if event.kind == 'dice' then
@@ -262,8 +284,12 @@ local function apply_system(event)
     end
 end
 
-function dailies.on_trade()
-    recent_trade = true
+-- Every 0x036 this client sends, other addons' included (XIIM selling to
+-- Junknix). Only one to Palalumin is a turn-in for his item request.
+function dailies.on_trade(data)
+    if trade.recipient(data) == 'Palalumin' then
+        pala_trade_at = os.clock()
+    end
 end
 
 function dailies.on_text(e)
@@ -478,15 +504,15 @@ end
 
 -- One attempt per frame. Once the npc keeps the items, the request is
 -- complete and its row leaves the panel. A turn-in sent to Palalumin also
--- arms the flag a hand-traded 0x036 does, so "Quest Completed" can still
--- close the row. A click does not target Palalumin, so that line counts with
--- anything targeted. Once the Aether Traveler keeps the week's items, his row
--- offers to store the fragments he gave, until he keeps those too.
+-- counts as a hand trade to him, so "Quest Completed" can still close the
+-- row: Ashita does not show an addon its own packet. Once the Aether
+-- Traveler keeps the week's items, his row offers to store the fragments he
+-- gave, until he keeps those too.
 function dailies.trade_update()
+    pala_traded()
     local result, npc = trade.update()
     if result == 'sent' and npc == 'Palalumin' then
-        recent_trade = true
-        button_trade = true
+        pala_trade_at = os.clock()
     elseif result == 'sent' and npc == P.AETHER_NPC then
         local row = open_request(npc)
         if row and not row.completed then
