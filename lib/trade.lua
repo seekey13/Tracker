@@ -55,11 +55,35 @@ local function in_event()
     return ok and status == 4
 end
 
+function trade.in_event()
+    return in_event()
+end
+
 local function clean_name(name)
     if type(name) ~= 'string' then
         return ''
     end
     return (name:gsub('%z.*', ''):gsub('%s+$', ''))
+end
+
+--- Who an outgoing 0x036 is for: the name at the npc index it carries.
+--- Nil when the packet is short or the index has no name.
+function trade.recipient(data)
+    if type(data) ~= 'string' or #data < 60 then
+        return nil
+    end
+    local index = data:byte(59) + data:byte(60) * 256
+    local ok, name = pcall(function()
+        return AshitaCore:GetMemoryManager():GetEntity():GetName(index)
+    end)
+    if not ok then
+        return nil
+    end
+    name = clean_name(name)
+    if name == '' then
+        return nil
+    end
+    return name
 end
 
 -- True in the npc's zone within 3 yalms of its spot.

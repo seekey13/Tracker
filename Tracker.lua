@@ -256,7 +256,7 @@ end)
 
 ashita.events.register('packet_out', 'tracker_packet_out', function(e)
     if e.id == 0x0036 then
-        dailies.on_trade()
+        dailies.on_trade(e.data)
     end
 end)
 
