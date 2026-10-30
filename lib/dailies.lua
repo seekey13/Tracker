@@ -504,10 +504,10 @@ end
 
 -- One attempt per frame. Once the npc keeps the items, the request is
 -- complete and its row leaves the panel. A turn-in sent to Palalumin also
--- counts as a hand trade to him, so "Quest Completed" can still close the
--- row: Ashita does not show an addon its own packet. Once the Aether
--- Traveler keeps the week's items, his row offers to store the fragments he
--- gave, until he keeps those too.
+-- counts as a hand trade to him from the frame it is sent, so "Quest
+-- Completed" can still close the row. Once the Aether Traveler keeps the
+-- week's items, his row offers to store the fragments he gave, until he
+-- keeps those too.
 function dailies.trade_update()
     pala_traded()
     local result, npc = trade.update()
