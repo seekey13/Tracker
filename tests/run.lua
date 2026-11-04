@@ -65,8 +65,19 @@ end
 
 bit = require('bit')
 addon = {}
+-- Ashita's T{} answers a key the table lacks from the table library, so a
+-- missing count reads as table.count.
+local T_METHODS = {
+    count = function() return 0 end,
+    first = function() return nil end,
+    find = function() return nil end,
+}
 T = function(t)
-    return t or {}
+    return setmetatable(t or {}, {
+        __index = function(_, k)
+            return T_METHODS[k] or table[k]
+        end,
+    })
 end
 
 local world = {
@@ -149,6 +160,25 @@ AshitaCore = {
 local settings_path = 'R:\\CatsEyeXI\\catseyexi-client\\Vanacore\\config\\addons\\Tracker\\defaults\\'
 local listeners = {}
 local saves = 0
+local loaded = nil
+
+-- Ashita's settings save stops at a function anywhere in the settings.
+local function function_in(value, path, seen)
+    if type(value) == 'function' then
+        return path
+    end
+    if type(value) ~= 'table' or seen[value] then
+        return nil
+    end
+    seen[value] = true
+    for key, inner in next, value do
+        local hit = function_in(inner, path .. '[' .. tostring(key) .. ']', seen)
+        if hit then
+            return hit
+        end
+    end
+    return nil
+end
 
 local settings = {
     settings_path = function()
@@ -165,10 +195,18 @@ local settings = {
         for _, fn in ipairs(listeners) do
             fn(saved)
         end
+        loaded = saved
         return saved
     end,
     save = function()
         saves = saves + 1
+        local seen = {}
+        local bound = package.loaded['lib.dailies']
+        bound = bound and bound.settings and bound.settings()
+        local hit = function_in(loaded, 'settings', seen) or function_in(bound, 'settings', seen)
+        if hit then
+            fail('save: ' .. hit .. ' is a function')
+        end
     end,
 }
 
@@ -772,6 +810,32 @@ eq(cfg.dailies.Beetrix.status, 'complete', 'congratulations marks the daily comp
 eq(cfg.dailies.Beetrix.zone, 'Gusgen Mines', 'congratulations keeps the zone')
 eq(cfg.dailies.Beetrix.item, 'Gusgen Clay', 'congratulations keeps the item')
 eq(dailies.is_complete({ message = 'Congratulations! Here is your reward!' }), true, 'stored congratulations counts as complete')
+
+-- A reload reads each row back as T{}, where a missing count is table.count.
+-- His reward line must not carry that function into the settings.
+cfg.dailies.Beetrix = T{
+    message = 'Go to Gusgen Mines, get a Gusgen Clay and trade it to me!',
+    item = 'Gusgen Clay',
+    zone = 'Gusgen Mines',
+}
+eq(type(cfg.dailies.Beetrix.count), 'function', 'a reloaded row answers count from the table library')
+local saves_before_reward = saves
+text_in("Beetrix : Congratulations! You've completed my quest for today, here's your reward!", 9)
+eq(rawget(cfg.dailies.Beetrix, 'count'), nil, 'the reward line carries no count the row never had')
+eq(cfg.dailies.Beetrix.status, 'complete', 'the reward line completes a reloaded row')
+eq(cfg.dailies.Beetrix.item, 'Gusgen Clay', "the reward line keeps a reloaded row's item")
+eq(saves, saves_before_reward + 1, 'the reward line saves')
+
+-- Talking to him again after the reward keeps the daily finished.
+cfg.dailies.Beetrix = T(cfg.dailies.Beetrix)
+text_in("Beetrix : You've already completed this quest today! Come back tomorrow for more.", 9)
+eq(cfg.dailies.Beetrix.status, 'complete', 'already completed keeps the daily finished')
+eq(cfg.dailies.Beetrix.item, 'Gusgen Clay', 'already completed keeps the item')
+eq(rawget(cfg.dailies.Beetrix, 'count'), nil, 'already completed carries no table function')
+eq(dailies.is_complete(T{ message = "You've already completed this quest today! Come back tomorrow for more." }), true,
+    'a stored already completed line counts as complete')
+eq(dailies.is_complete(T{ message = 'Go to Gusgen Mines, get a Gusgen Clay and trade it to me!' }), false,
+    'a stored task line is not complete')
 eq(cfg.dailies.Fishstix.zone, 'Zeruhn Mines', 'talk stores fishstix')
 eq(cfg.dailies.Mistrix.item, 'oak cudgel', 'talk stores mistrix')
 

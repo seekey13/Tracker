@@ -33,6 +33,27 @@ local function save()
     settingslib.save()
 end
 
+-- A row read back from the settings file is a T{} table, and T{} answers a
+-- field it lacks from the table library: a Beetrix row's count is
+-- table.count. A function in the settings stops every save after it.
+local function own(row, key)
+    if type(row) ~= 'table' then
+        return nil
+    end
+    return rawget(row, key)
+end
+
+-- A goblin's line once his daily is done today: the reward, or the line for
+-- talking to him again after it.
+local function finished_line(message)
+    if type(message) ~= 'string' then
+        return false
+    end
+    local lower = message:lower()
+    return lower:find('congratulat', 1, true) ~= nil
+        or lower:find('already completed', 1, true) ~= nil
+end
+
 function dailies.bind(saved)
     cfg = saved
     if type(cfg.dailies) ~= 'table' then
@@ -310,20 +331,18 @@ function dailies.on_text(e)
         end
         -- A second visit must not forget how many Murdox kills are left.
         local prev = cfg.dailies[npc]
-        if npc == 'Murdox' and prev and prev.remaining then
-            data.remaining = prev.remaining
+        if npc == 'Murdox' and own(prev, 'remaining') then
+            data.remaining = own(prev, 'remaining')
         end
-        -- "Congratulations! You've completed my quest..." replaces the task
-        -- line. Keep the zone and item, and show the row as finished.
-        if type(data.message) == 'string' and data.message:lower():find('congratulat', 1, true) then
+        -- "Congratulations! You've completed my quest..." and "You've already
+        -- completed this quest today!" replace the task line. Keep the zone
+        -- and item, and keep the row finished until the day rolls.
+        if finished_line(data.message) then
             data.status = 'complete'
-            if prev then
-                data.zone = data.zone or prev.zone
-                data.item = data.item or prev.item
-                data.target = data.target or prev.target
-                data.count = data.count or prev.count
-                data.hint = data.hint or prev.hint
-                data.remaining = data.remaining or prev.remaining
+            for _, key in ipairs({ 'zone', 'item', 'target', 'count', 'hint', 'remaining' }) do
+                if data[key] == nil then
+                    data[key] = own(prev, key)
+                end
             end
         end
         cfg.dailies[npc] = data
@@ -361,17 +380,16 @@ function dailies.on_text(e)
     end
 end
 
--- A stored congratulations line is the same finish as "quest complete",
--- including rows saved before that line set a status.
+-- A stored congratulations or "already completed" line is the same finish
+-- as "quest complete", including rows saved before that line set a status.
 function dailies.is_complete(row)
     if type(row) ~= 'table' then
         return false
     end
-    if row.status == 'complete' then
+    if own(row, 'status') == 'complete' then
         return true
     end
-    local message = row.message
-    return type(message) == 'string' and message:lower():find('congratulat', 1, true) ~= nil
+    return finished_line(own(row, 'message'))
 end
 
 -- Chat summary. Same words the Goldilox command printed.
