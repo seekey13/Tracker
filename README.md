@@ -31,6 +31,6 @@ Closing the window is not remembered.
 
 The day rolls at Japanese midnight. That clears the dailies and leaves the AMAN regime alone.
 
-A goblin who says "Congratulations!" has finished that daily. That row leaves the panel. Once every daily is finished and the Goldilox reward is collected, the section hides.
+A goblin who says "Congratulations!" or "You've already completed this quest today!" has finished that daily. That row leaves the panel. Once every daily is finished and the Goldilox reward is collected, the section hides.
 
 The Aether Traveler in Port Jeuno wants three of one item each week. Hear his weekly special and the item shows under Aether Traveler with how many you carry. Within 3 yalms of him with all three, a Trade button hands them over. Once he keeps them, the row asks "Store Aether Fragments?" with how many his reward added, and its Trade button hands those fragments back to him to keep. Once he keeps them, or they leave your inventory, the section hides. The request is kept until midnight Monday, Japanese time.

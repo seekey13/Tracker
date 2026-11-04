@@ -10,6 +10,7 @@ midnight. The Aether Traveler's request lasts until midnight Monday there.
 local chat = require('chat')
 local settingslib = require('settings')
 local P = require('lib.daily_parse')
+local items = require('lib.items')
 local trade = require('lib.trade')
 
 local dailies = {}
@@ -18,17 +19,42 @@ dailies.order = P.GOBLIN_ORDER
 dailies.pala_order = P.PALALUMIN_ORDER
 
 local cfg
-local recent_trade = false
--- The button sends to Palalumin whatever the player has targeted. A turn-in
--- to Beetrix leaves this alone.
-local button_trade = false
+-- When this character last traded to Palalumin, by hand or with the button.
+-- His "Quest Completed" closes the item request only through the event that
+-- trade starts and PALA_TRADE_WINDOW seconds past it. A trade to anyone
+-- else, his line for the kills, or a party member's line does not.
+local pala_trade_at = nil
+local PALA_TRADE_WINDOW = 10
+-- Where that trade's event is: 'waiting' for it to start, 'open', or
+-- 'closed'. A later event does not hold the window open.
+local pala_event = nil
 -- Aether Fragments carried when the week's items went to the Aether Traveler.
 local fragments_before = nil
 local counts = nil
-local item_ids = {}
 
 local function save()
     settingslib.save()
+end
+
+-- A row read back from the settings file is a T{} table, and T{} answers a
+-- field it lacks from the table library: a Beetrix row's count is
+-- table.count. A function in the settings stops every save after it.
+local function own(row, key)
+    if type(row) ~= 'table' then
+        return nil
+    end
+    return rawget(row, key)
+end
+
+-- A goblin's line once his daily is done today: the reward, or the line for
+-- talking to him again after it.
+local function finished_line(message)
+    if type(message) ~= 'string' then
+        return false
+    end
+    local lower = message:lower()
+    return lower:find('congratulat', 1, true) ~= nil
+        or lower:find('already completed', 1, true) ~= nil
 end
 
 function dailies.bind(saved)
@@ -90,33 +116,9 @@ function dailies.roll_day()
     return true
 end
 
-local function lookup_item_id(item_name)
-    if item_ids[item_name] ~= nil then
-        return item_ids[item_name] or nil
-    end
-    local resources = AshitaCore:GetResourceManager()
-    if not resources then
-        return nil
-    end
-    for _, lang in ipairs({ 0, 1, 2, 3 }) do
-        local ok, id = pcall(function()
-            local item = resources:GetItemByName(item_name, lang)
-            if item == nil then
-                return nil
-            end
-            return item.Id
-        end)
-        if ok and type(id) == 'number' and id > 0 then
-            item_ids[item_name] = id
-            return id
-        end
-    end
-    return nil
-end
-
 -- Inventory only (container 0), locked stacks included. Slot 0 is gil, so
--- the count runs from slot 1, as a trade does. item_name may be an item id.
--- Nil when the client cannot answer yet.
+-- the count runs from slot 1, as a trade does. item_name may be an item id,
+-- or an item's short or full name. Nil when the client cannot answer yet.
 function dailies.item_count(item_name)
     local by_id = type(item_name) == 'number'
     if not by_id and (type(item_name) ~= 'string' or item_name == '') then
@@ -129,12 +131,17 @@ function dailies.item_count(item_name)
         end
         return cached
     end
-    local item_id = by_id and item_name or lookup_item_id(item_name)
+    local item_id, looked = item_name, true
+    if not by_id then
+        item_id, looked = items.id(item_name)
+    end
     if not item_id then
+        -- A full name with no carried item to match is none carried.
+        local answer = looked and 0 or false
         if counts then
-            counts[item_name] = false
+            counts[item_name] = answer
         end
-        return nil
+        return answer or nil
     end
     local inventory = AshitaCore:GetMemoryManager():GetInventory()
     if not inventory then
@@ -182,6 +189,38 @@ local function target_name()
         return nil
     end
     return ent.Name
+end
+
+local function pala_arm()
+    pala_trade_at = os.clock()
+    pala_event = 'waiting'
+end
+
+local function pala_disarm()
+    pala_trade_at = nil
+    pala_event = nil
+end
+
+-- True while this character's last trade to Palalumin can still be what his
+-- "Quest Completed" is for. Runs every frame, so a long event keeps it. Only
+-- the first event after the trade does: once it ends, the window runs out
+-- from its last frame whatever starts next.
+local function pala_traded()
+    if pala_trade_at == nil then
+        return false
+    end
+    local now = os.clock()
+    if trade.in_event() and pala_event ~= 'closed' then
+        pala_event = 'open'
+        pala_trade_at = now
+    elseif pala_event == 'open' then
+        pala_event = 'closed'
+    end
+    if now - pala_trade_at > PALA_TRADE_WINDOW then
+        pala_disarm()
+        return false
+    end
+    return true
 end
 
 local function apply_system(event)
@@ -238,22 +277,26 @@ local function apply_system(event)
                 row.completed = true
                 save()
             end
-        elseif name == 'Palalumin' or button_trade then
-            local defeat = cfg.palalumin_quests['Defeat mobs']
-            if defeat and not defeat.completed and defeat.killed and defeat.total and defeat.killed >= defeat.total then
-                defeat.completed = true
-                save()
-            end
-            if recent_trade then
-                local item_req = cfg.palalumin_quests['Item request']
-                if item_req and not item_req.completed then
-                    item_req.completed = true
+        else
+            -- A button click leaves Palalumin untargeted, so a recent trade
+            -- to him stands in for the target.
+            local traded = pala_traded()
+            if name == 'Palalumin' or traded then
+                local defeat = cfg.palalumin_quests['Defeat mobs']
+                if defeat and not defeat.completed and defeat.killed and defeat.total and defeat.killed >= defeat.total then
+                    defeat.completed = true
                     save()
+                end
+                if traded then
+                    local item_req = cfg.palalumin_quests['Item request']
+                    if item_req and not item_req.completed then
+                        item_req.completed = true
+                        save()
+                    end
                 end
             end
         end
-        recent_trade = false
-        button_trade = false
+        pala_disarm()
         return
     end
     if event.kind == 'dice' then
@@ -262,8 +305,15 @@ local function apply_system(event)
     end
 end
 
-function dailies.on_trade()
-    recent_trade = true
+-- Every 0x036 this client sends, other addons' included (XIIM selling to
+-- Junknix). Only one to Palalumin is a turn-in for his item request. A trade
+-- to anyone else is newer than any to him, so it ends his window.
+function dailies.on_trade(data)
+    if trade.recipient(data) == 'Palalumin' then
+        pala_arm()
+    else
+        pala_disarm()
+    end
 end
 
 function dailies.on_text(e)
@@ -303,20 +353,18 @@ function dailies.on_text(e)
         end
         -- A second visit must not forget how many Murdox kills are left.
         local prev = cfg.dailies[npc]
-        if npc == 'Murdox' and prev and prev.remaining then
-            data.remaining = prev.remaining
+        if npc == 'Murdox' and own(prev, 'remaining') then
+            data.remaining = own(prev, 'remaining')
         end
-        -- "Congratulations! You've completed my quest..." replaces the task
-        -- line. Keep the zone and item, and show the row as finished.
-        if type(data.message) == 'string' and data.message:lower():find('congratulat', 1, true) then
+        -- "Congratulations! You've completed my quest..." and "You've already
+        -- completed this quest today!" replace the task line. Keep the zone
+        -- and item, and keep the row finished until the day rolls.
+        if finished_line(data.message) then
             data.status = 'complete'
-            if prev then
-                data.zone = data.zone or prev.zone
-                data.item = data.item or prev.item
-                data.target = data.target or prev.target
-                data.count = data.count or prev.count
-                data.hint = data.hint or prev.hint
-                data.remaining = data.remaining or prev.remaining
+            for _, key in ipairs({ 'zone', 'item', 'target', 'count', 'hint', 'remaining' }) do
+                if data[key] == nil then
+                    data[key] = own(prev, key)
+                end
             end
         end
         cfg.dailies[npc] = data
@@ -330,7 +378,7 @@ function dailies.on_text(e)
             return
         end
         -- The name as he wrote it when the client knows it, else the singular.
-        local item = lookup_item_id(named) and named or single
+        local item = items.id(named) and named or single
         -- Hearing the special again after the turn-in leaves it done.
         local prev = cfg.aether
         if type(prev) == 'table' and prev.completed and prev.item == item then
@@ -354,17 +402,16 @@ function dailies.on_text(e)
     end
 end
 
--- A stored congratulations line is the same finish as "quest complete",
--- including rows saved before that line set a status.
+-- A stored congratulations or "already completed" line is the same finish
+-- as "quest complete", including rows saved before that line set a status.
 function dailies.is_complete(row)
     if type(row) ~= 'table' then
         return false
     end
-    if row.status == 'complete' then
+    if own(row, 'status') == 'complete' then
         return true
     end
-    local message = row.message
-    return type(message) == 'string' and message:lower():find('congratulat', 1, true) ~= nil
+    return finished_line(own(row, 'message'))
 end
 
 -- Chat summary. Same words the Goldilox command printed.
@@ -381,10 +428,11 @@ local function goblin_status(npc, row)
     if npc == 'Fishstix' and row.zone then
         return 'Secret chest at ' .. row.zone
     end
-    if npc == 'Murdox' and row.count and row.target and row.zone then
-        local remaining = row.remaining or row.count
+    local count = own(row, 'count')
+    if npc == 'Murdox' and count and row.target and row.zone then
+        local remaining = row.remaining or count
         return 'Kill ' .. remaining .. ' more ' .. row.target .. ' at ' .. row.zone
-            .. ' (' .. row.count .. ' total)'
+            .. ' (' .. count .. ' total)'
     end
     if npc == 'Mistrix' and row.item then
         return 'Trade a signed ' .. row.item
@@ -478,15 +526,18 @@ end
 
 -- One attempt per frame. Once the npc keeps the items, the request is
 -- complete and its row leaves the panel. A turn-in sent to Palalumin also
--- arms the flag a hand-traded 0x036 does, so "Quest Completed" can still
--- close the row. A click does not target Palalumin, so that line counts with
--- anything targeted. Once the Aether Traveler keeps the week's items, his row
--- offers to store the fragments he gave, until he keeps those too.
+-- counts as a hand trade to him from the frame it is sent, so "Quest
+-- Completed" can still close the row. Items he hands back end that, so his
+-- line for the kills does not. Once the Aether Traveler keeps the week's
+-- items, his row offers to store the fragments he gave, until he keeps those
+-- too.
 function dailies.trade_update()
+    pala_traded()
     local result, npc = trade.update()
     if result == 'sent' and npc == 'Palalumin' then
-        recent_trade = true
-        button_trade = true
+        pala_arm()
+    elseif result == 'returned' and npc == 'Palalumin' then
+        pala_disarm()
     elseif result == 'sent' and npc == P.AETHER_NPC then
         local row = open_request(npc)
         if row and not row.completed then

@@ -65,8 +65,19 @@ end
 
 bit = require('bit')
 addon = {}
+-- Ashita's T{} answers a key the table lacks from the table library, so a
+-- missing count reads as table.count.
+local T_METHODS = {
+    count = function() return 0 end,
+    first = function() return nil end,
+    find = function() return nil end,
+}
 T = function(t)
-    return t or {}
+    return setmetatable(t or {}, {
+        __index = function(_, k)
+            return T_METHODS[k] or table[k]
+        end,
+    })
 end
 
 local world = {
@@ -116,8 +127,16 @@ AshitaCore = {
             GetInventory = function()
                 return nil
             end,
+            -- world.npcs names entities by index, for a trade's recipient.
             GetEntity = function()
-                return nil
+                if world.npcs == nil then
+                    return nil
+                end
+                return {
+                    GetName = function(_, index)
+                        return world.npcs[index] or ''
+                    end,
+                }
             end,
         }
     end,
@@ -141,6 +160,25 @@ AshitaCore = {
 local settings_path = 'R:\\CatsEyeXI\\catseyexi-client\\Vanacore\\config\\addons\\Tracker\\defaults\\'
 local listeners = {}
 local saves = 0
+local loaded = nil
+
+-- Ashita's settings save stops at a function anywhere in the settings.
+local function function_in(value, path, seen)
+    if type(value) == 'function' then
+        return path
+    end
+    if type(value) ~= 'table' or seen[value] then
+        return nil
+    end
+    seen[value] = true
+    for key, inner in next, value do
+        local hit = function_in(inner, path .. '[' .. tostring(key) .. ']', seen)
+        if hit then
+            return hit
+        end
+    end
+    return nil
+end
 
 local settings = {
     settings_path = function()
@@ -157,10 +195,18 @@ local settings = {
         for _, fn in ipairs(listeners) do
             fn(saved)
         end
+        loaded = saved
         return saved
     end,
     save = function()
         saves = saves + 1
+        local seen = {}
+        local bound = package.loaded['lib.dailies']
+        bound = bound and bound.settings and bound.settings()
+        local hit = function_in(loaded, 'settings', seen) or function_in(bound, 'settings', seen)
+        if hit then
+            fail('save: ' .. hit .. ' is a function')
+        end
     end,
 }
 
@@ -414,6 +460,11 @@ local function text_in(message, mode, injected)
         mode = mode or 0,
         injected = injected or false,
     })
+end
+
+-- A 64-byte 0x036 that only names the npc index, at bytes 59-60.
+local function trade_packet(index)
+    return string.rep('\0', 58) .. string.char(index % 256, math.floor(index / 256)) .. string.rep('\0', 4)
 end
 
 local function has_text(fragment)
@@ -759,6 +810,32 @@ eq(cfg.dailies.Beetrix.status, 'complete', 'congratulations marks the daily comp
 eq(cfg.dailies.Beetrix.zone, 'Gusgen Mines', 'congratulations keeps the zone')
 eq(cfg.dailies.Beetrix.item, 'Gusgen Clay', 'congratulations keeps the item')
 eq(dailies.is_complete({ message = 'Congratulations! Here is your reward!' }), true, 'stored congratulations counts as complete')
+
+-- A reload reads each row back as T{}, where a missing count is table.count.
+-- His reward line must not carry that function into the settings.
+cfg.dailies.Beetrix = T{
+    message = 'Go to Gusgen Mines, get a Gusgen Clay and trade it to me!',
+    item = 'Gusgen Clay',
+    zone = 'Gusgen Mines',
+}
+eq(type(cfg.dailies.Beetrix.count), 'function', 'a reloaded row answers count from the table library')
+local saves_before_reward = saves
+text_in("Beetrix : Congratulations! You've completed my quest for today, here's your reward!", 9)
+eq(rawget(cfg.dailies.Beetrix, 'count'), nil, 'the reward line carries no count the row never had')
+eq(cfg.dailies.Beetrix.status, 'complete', 'the reward line completes a reloaded row')
+eq(cfg.dailies.Beetrix.item, 'Gusgen Clay', "the reward line keeps a reloaded row's item")
+eq(saves, saves_before_reward + 1, 'the reward line saves')
+
+-- Talking to him again after the reward keeps the daily finished.
+cfg.dailies.Beetrix = T(cfg.dailies.Beetrix)
+text_in("Beetrix : You've already completed this quest today! Come back tomorrow for more.", 9)
+eq(cfg.dailies.Beetrix.status, 'complete', 'already completed keeps the daily finished')
+eq(cfg.dailies.Beetrix.item, 'Gusgen Clay', 'already completed keeps the item')
+eq(rawget(cfg.dailies.Beetrix, 'count'), nil, 'already completed carries no table function')
+eq(dailies.is_complete(T{ message = "You've already completed this quest today! Come back tomorrow for more." }), true,
+    'a stored already completed line counts as complete')
+eq(dailies.is_complete(T{ message = 'Go to Gusgen Mines, get a Gusgen Clay and trade it to me!' }), false,
+    'a stored task line is not complete')
 eq(cfg.dailies.Fishstix.zone, 'Zeruhn Mines', 'talk stores fishstix')
 eq(cfg.dailies.Mistrix.item, 'oak cudgel', 'talk stores mistrix')
 
@@ -787,18 +864,42 @@ eq(cfg.palalumin_quests['Defeat mobs'].killed, 3, 'defeat stored')
 text_in('Defeat Mobs 5/10 (Zdei in Grand Palace of HuXzoi)', 121)
 eq(cfg.palalumin_quests['Defeat mobs'].killed, 5, 'system updates the kill count')
 
-handlers.packet_out({ id = 0x0036 })
+world.npcs = { [1794] = 'Palalumin', [600] = 'Junknix' }
+-- A trade to anyone else, as XIIM selling to Junknix, is not his turn-in.
+handlers.packet_out({ id = 0x0036, data = trade_packet(600) })
 world.target = 'Palalumin'
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'a trade to another npc leaves the item request open')
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
 text_in('Quest Completed', 121)
 eq(cfg.palalumin_quests['Item request'].completed, true, 'trade completes the item request')
 eq(cfg.palalumin_quests['Defeat mobs'].completed, nil, 'kills short of the total stay open')
 
+-- His line for the kills, with an old trade elsewhere, leaves the items open.
 cfg.palalumin_quests['Defeat mobs'].killed = 10
 cfg.palalumin_quests['Item request'].completed = nil
-handlers.packet_out({ id = 0x0036 })
+handlers.packet_out({ id = 0x0036, data = trade_packet(600) })
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Defeat mobs'].completed, true, 'his line completes satisfied kills')
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'his line for the kills leaves the items open')
+
+cfg.palalumin_quests['Defeat mobs'].completed = nil
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
 text_in('Quest Completed', 121)
 eq(cfg.palalumin_quests['Defeat mobs'].completed, true, 'satisfied kills complete')
 eq(cfg.palalumin_quests['Item request'].completed, true, 'same turn-in completes the items')
+
+-- A later trade elsewhere ends his window, and a blocked trade never opens it.
+cfg.palalumin_quests['Item request'].completed = nil
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
+handlers.packet_out({ id = 0x0036, data = trade_packet(600) })
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'a later trade elsewhere ends his window')
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794), blocked = true })
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'a blocked trade to him is not a turn-in')
+cfg.palalumin_quests['Item request'].completed = true
+world.npcs = nil
 
 cfg.palalumin_quests['Find flux'].completed = nil
 world.target = 'Lumorian Flux'
@@ -1029,6 +1130,22 @@ local function has_rect(col)
     return false
 end
 
+local function count_rect(col)
+    local n = 0
+    for _, painted in ipairs(rects) do
+        if painted == col then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- #E8B45C at alpha 0..255, as the draw list takes it.
+local function amber_rect(alpha)
+    local r, g, b = 0xE8, 0xB4, 0x5C
+    return ((alpha * 256 + b) * 256 + g) * 256 + r
+end
+
 -- True when col is among the rects painted just before the named text or
 -- button, with nothing else drawn between them.
 local function laid_under(col, kind, value)
@@ -1067,6 +1184,16 @@ regime.clear()
 began = 0
 render()
 eq(began, 0, 'an empty day draws nothing')
+
+-- A saved row is a T{}, whose missing count is table.count. A Murdox row
+-- filled by "kills remain" alone has no count.
+cfg.dailies = {
+    Murdox = T{ remaining = '5', target = 'Crawlers', zone = 'East Sarutabaruta', message = 'Kill Crawlers.' },
+}
+render()
+eq(has_drawn('-5/0'), false, 'a reloaded murdox row without a count draws no meter')
+eq(dailies.goblin_line('Murdox', cfg.dailies.Murdox), 'Kill Crawlers.', 'its chat line falls back to the message')
+cfg.dailies = {}
 
 cfg.dailies = {
     Fishstix = { zone = 'Zeruhn Mines', hint = 'Far North' },
@@ -1107,13 +1234,18 @@ truthy(has_text('Secret chest at '), 'an open goblin stays')
 cfg.goldilox_time = cfg.deadline
 render()
 eq(has_drawn('Goldilox: Complete!'), false, 'a collected reward stays off the panel')
-eq(has_drawn('Goldilox: Reward not collected.'), false, 'a collected reward is not pending')
+eq(has_text('Goldilox: Reward not collected.'), false, 'a collected reward is not pending')
 truthy(has_text('Secret chest at '), 'open goblins stay when the reward is in')
+local tints_without = count_rect(amber_rect(31))
+local accents_without = count_rect(amber_rect(255))
 cfg.goldilox_time = nil
 render()
 truthy(has_text('Training in'), 'regime line')
 truthy(has_text('Lv 48~49'), 'level line')
-truthy(has_drawn('Goldilox: Reward not collected.'), 'reward notice')
+truthy(has_text('Goldilox: Reward not collected.'), 'reward notice')
+eq(faces['Goldilox: Reward not collected.'][2], faces['Secret chest at '][2], 'the reward notice is row-sized')
+eq(count_rect(amber_rect(31)), tints_without + 1, 'the reward notice keeps its gold tint')
+eq(count_rect(amber_rect(255)), accents_without + 1, 'the reward notice keeps its left accent')
 truthy(has_drawn('Tracker'), 'title')
 eq(#layout_calls, 1, 'layout is not registered again')
 eq(count_gaps(), 2, 'a gap sits between each section')
@@ -1379,14 +1511,19 @@ packet_matches(trade.build_trade(0x010F581D, 0x071D, {
     0C 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00
     29 18 02 0A 2A 47 1D 13 00 00 1D 07 08 00 00 00
 ]], '8-entry trade')
-packet_matches(trade.build_trade(0x010F581D, 0x071D, {
-    { slot = 0x44, count = 1 }, { slot = 0x3A, count = 1 }, { slot = 0x0D, count = 1 },
-}), [[
+local captured_trade = [[
     36 20 92 1A 1D 58 0F 01 01 00 00 00 01 00 00 00
     01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
     00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
     44 3A 0D 00 00 00 00 00 00 00 1D 07 03 00 00 00
-]], '3-entry trade')
+]]
+packet_matches(trade.build_trade(0x010F581D, 0x071D, {
+    { slot = 0x44, count = 1 }, { slot = 0x3A, count = 1 }, { slot = 0x0D, count = 1 },
+}), captured_trade, '3-entry trade')
+-- The recipient is read where the client's own packet keeps the npc index.
+world.npcs = { [0x071D] = 'Palalumin' }
+eq(trade.recipient(hex_to_bin(captured_trade)), 'Palalumin', 'recipient from a captured 0x036')
+world.npcs = nil
 
 local function read_u32(bytes, index)
     return bytes[index] + bytes[index + 1] * 256 + bytes[index + 2] * 65536 + bytes[index + 3] * 16777216
@@ -1425,6 +1562,8 @@ local names = {
     [1002] = 'Xzomit Organ',
     [1003] = 'Yovra Organ',
 }
+-- Full names the client keeps as log names. GetItemByName never sees these.
+local log_names = {}
 local old_memory = AshitaCore.GetMemoryManager
 local old_resources = AshitaCore.GetResourceManager
 local old_packets = AshitaCore.GetPacketManager
@@ -1508,7 +1647,7 @@ AshitaCore.GetResourceManager = function()
             if not item_name then
                 return nil
             end
-            return { Id = id, Name = { item_name } }
+            return { Id = id, Name = { item_name }, LogNameSingular = { log_names[id] or item_name:lower() } }
         end,
     }
 end
@@ -1900,6 +2039,47 @@ eq(cfg.palalumin_quests['Item request'].completed, nil, 'the next line with noth
 clock = clock + 3
 dailies.trade_update()
 eq(cfg.palalumin_quests['Item request'].completed, nil, 'items he hands back leave the request open')
+-- Items he hands back end the window, so his next line, as for the kills,
+-- leaves the request open.
+truthy(dailies.trade_start('Palalumin', needs), 'queue a turn-in he hands back')
+dailies.trade_update()
+clock = clock + 3
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'his line after a hand-back leaves the request open')
+
+-- A hand trade's own event holds the window however long it runs, and the
+-- window lasts 10 seconds past it.
+local function hand_trade_event()
+    handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
+    actors[10].status = 4
+    dailies.trade_update()
+end
+hand_trade_event()
+clock = clock + 30
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, true, 'a long trade event still completes the request')
+cfg.palalumin_quests['Item request'].completed = nil
+hand_trade_event()
+actors[10].status = 0
+dailies.trade_update()
+clock = clock + 9
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, true, 'his line just after the trade event still counts')
+cfg.palalumin_quests['Item request'].completed = nil
+-- A later event, as talking to him for the kills, does not hold it open.
+hand_trade_event()
+actors[10].status = 0
+dailies.trade_update()
+clock = clock + 5
+actors[10].status = 4
+dailies.trade_update()
+clock = clock + 6
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'a later event does not hold his window open')
+actors[10].status = 0
 truthy(dailies.trade_start('Palalumin', needs), 'queue a turn-in he keeps')
 dailies.trade_update()
 local phuabo, xzomit = holder.slots[1], holder.slots[2]
@@ -1919,6 +2099,29 @@ eq(has_text('Phuabo Organ'), false, 'a completed request leaves the panel')
 eq(button_at('##trade.Palalumin'), nil, 'a completed request has no trade button')
 holder.slots[1], holder.slots[2] = phuabo, xzomit
 
+-- The button turn-in above saw no "Quest Completed". This one disarms it.
+world.target = 'Palalumin'
+text_in('Quest Completed', 121)
+cfg.palalumin_quests['Item request'].completed = nil
+
+-- A hand trade counts through the event it starts and ten seconds past it.
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
+actors[10].status = 4
+clock = clock + 30
+dailies.trade_update()
+actors[10].status = 0
+clock = clock + 9
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, true, 'his line after a long event completes a hand trade')
+cfg.palalumin_quests['Item request'].completed = nil
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
+clock = clock + 11
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'his line long after a hand trade leaves the request open')
+world.target = nil
+
 -- Beetrix takes his one item in Lower Jeuno, from his own spot.
 local BEETRIX_X, BEETRIX_Y = -50.75, -56.37
 names[1004] = 'Gusgen Clay'
@@ -1936,10 +2139,6 @@ cfg.dailies = {
         zone = 'Gusgen Mines',
     },
 }
--- The Palalumin turn-in above saw no "Quest Completed". This one disarms it.
-world.target = nil
-text_in('Quest Completed', 121)
-cfg.palalumin_quests['Item request'].completed = nil
 clock = clock + 3
 dailies.trade_update()
 
@@ -2140,6 +2339,58 @@ holder.slots[7] = nil
 holder.slots[8] = nil
 actors[1792] = nil
 cfg.aether = nil
+world.zone = 34
+player.x, player.y = SPOT_X, SPOT_Y
+
+-- Beetrix can name his item in full where the client cuts it short. The
+-- full name is the item's log name, so it is found on the item carried.
+names[1007] = 'Sch. Testimony'
+log_names[1007] = "scholar's testimony"
+local testimony_name = "Scholar's Testimony"
+local testimony = { { name = testimony_name, needed = 1 } }
+cfg.palalumin_quests = {}
+cfg.dailies = {
+    Beetrix = {
+        message = "Go to Castle Oztroja, get a Scholar's Testimony and trade it to me!",
+        item = testimony_name,
+        zone = 'Castle Oztroja',
+    },
+}
+actors[1830] = { name = 'Beetrix', id = 17782822, flags = 0x200, dist = 0.25, status = 0, x = BEETRIX_X, y = BEETRIX_Y }
+world.zone = 245
+player.x, player.y = BEETRIX_X, BEETRIX_Y
+clock = clock + 3
+
+dailies.begin_frame()
+eq(dailies.item_count(testimony_name), 0, 'a full name with none carried counts none')
+eq(dailies.trade_button('Beetrix', testimony), nil, 'none carried draws no button')
+render()
+truthy(has_text('0/1'), 'none carried counts 0 of 1, not ?')
+
+holder.slots[9] = { Id = 1007, Count = 1, Flags = 0 }
+dailies.begin_frame()
+eq(dailies.item_count(testimony_name), 1, 'the full name counts the item carried under its short name')
+eq(dailies.item_count('sch. testimony'), 1, 'the short name counts it too')
+eq(dailies.trade_button('Beetrix', testimony), 'ready', 'the full name can be traded')
+render()
+truthy(has_text('1/1'), 'the carried testimony counts 1 of 1')
+truthy(button_at('##trade.Beetrix'), 'the carried testimony draws the button')
+
+click_id = '##trade.Beetrix'
+render()
+local testimony_sent = #captured
+handlers.d3d_present()
+eq(#captured, testimony_sent + 1, 'present sends the testimony')
+eq(read_u32(captured[#captured].data, 9), 1, 'one testimony is sent')
+eq(captured[#captured].data[49], 9, 'from the slot it is carried in')
+
+holder.slots[9] = nil
+clock = clock + 3
+dailies.trade_update()
+eq(cfg.dailies.Beetrix.status, 'complete', 'the testimony he kept completes the daily')
+dailies.begin_frame()
+eq(dailies.item_count(testimony_name), 0, 'the handed-over testimony counts none')
+actors[1830] = nil
 world.zone = 34
 player.x, player.y = SPOT_X, SPOT_Y
 
