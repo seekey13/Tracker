@@ -1119,6 +1119,22 @@ local function has_rect(col)
     return false
 end
 
+local function count_rect(col)
+    local n = 0
+    for _, painted in ipairs(rects) do
+        if painted == col then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- #E8B45C at alpha 0..255, as the draw list takes it.
+local function amber_rect(alpha)
+    local r, g, b = 0xE8, 0xB4, 0x5C
+    return ((alpha * 256 + b) * 256 + g) * 256 + r
+end
+
 -- True when col is among the rects painted just before the named text or
 -- button, with nothing else drawn between them.
 local function laid_under(col, kind, value)
@@ -1197,13 +1213,18 @@ truthy(has_text('Secret chest at '), 'an open goblin stays')
 cfg.goldilox_time = cfg.deadline
 render()
 eq(has_drawn('Goldilox: Complete!'), false, 'a collected reward stays off the panel')
-eq(has_drawn('Goldilox: Reward not collected.'), false, 'a collected reward is not pending')
+eq(has_text('Goldilox: Reward not collected.'), false, 'a collected reward is not pending')
 truthy(has_text('Secret chest at '), 'open goblins stay when the reward is in')
+local tints_without = count_rect(amber_rect(31))
+local accents_without = count_rect(amber_rect(255))
 cfg.goldilox_time = nil
 render()
 truthy(has_text('Training in'), 'regime line')
 truthy(has_text('Lv 48~49'), 'level line')
-truthy(has_drawn('Goldilox: Reward not collected.'), 'reward notice')
+truthy(has_text('Goldilox: Reward not collected.'), 'reward notice')
+eq(faces['Goldilox: Reward not collected.'][2], faces['Secret chest at '][2], 'the reward notice is row-sized')
+eq(count_rect(amber_rect(31)), tints_without + 1, 'the reward notice keeps its gold tint')
+eq(count_rect(amber_rect(255)), accents_without + 1, 'the reward notice keeps its left accent')
 truthy(has_drawn('Tracker'), 'title')
 eq(#layout_calls, 1, 'layout is not registered again')
 eq(count_gaps(), 2, 'a gap sits between each section')

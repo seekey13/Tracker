@@ -455,11 +455,17 @@ local function show_tooltip(text)
 end
 
 -- flush: the meter runs to the well's right edge, so it meets the level text.
-local function paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush)
+-- tint: a notice's colour, washed over the well with a bar down its left edge.
+local function paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush, tint)
     local radius = S(3)
     -- Wells stay solid. The window frame's fade does not apply here.
     fill(dl, x1, y1, well_w, row_h, HEX.well, radius, 1)
     outline(dl, x1, y1, well_w, row_h, HEX.line, radius, 1)
+    if tint then
+        fill(dl, x1, y1, well_w, row_h, tint, radius, 0.12)
+        local left = ImDrawFlags_RoundCornersLeft or ImDrawCornerFlags_Left
+        fill(dl, x1, y1, S(2), row_h, tint, S(2), 1, left)
+    end
     if fraction == nil or well_w <= S(8) then
         return
     end
@@ -479,7 +485,7 @@ local function paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush)
     fill(dl, mx, my, math.max(mh, mw * frac), mh, meter, mh / 2, 1)
 end
 
-local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing, flush)
+local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing, flush, tint)
     local pad_y = S(1)
     local dl = imgui.GetWindowDrawList()
     -- outer: the window already split channels, so the well goes on the back
@@ -506,7 +512,7 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
         local size = grounds[ground_key]
         if size then
             local gx, gy = imgui.GetCursorScreenPos()
-            paint_well(dl, gx, gy, size[1], size[2], fraction, bar_color, flush)
+            paint_well(dl, gx, gy, size[1], size[2], fraction, bar_color, flush, tint)
         end
     end
 
@@ -550,11 +556,11 @@ local function draw_bar(fraction, count_text, bar_color, content_fn, add_spacing
 
     if layer == 'outer' then
         pcall(function() dl:ChannelsSetCurrent(1) end)
-        paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush)
+        paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush, tint)
         pcall(function() dl:ChannelsSetCurrent(2) end)
     elseif layer == 'inner' then
         pcall(function() dl:ChannelsSetCurrent(0) end)
-        paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush)
+        paint_well(dl, x1, y1, well_w, row_h, fraction, bar_color, flush, tint)
         pcall(function() dl:ChannelsMerge() end)
     else
         grounds_next[ground_key] = { well_w, row_h }
@@ -566,6 +572,14 @@ end
 
 local function draw_static(content_fn, add_spacing)
     draw_bar(nil, '', nil, content_fn, add_spacing, false)
+end
+
+-- A notice in a row's well: a quest row's text size, on the notice's tint
+-- and left accent.
+local function draw_notice_row(text, hex)
+    draw_bar(nil, '', nil, function()
+        imgui.TextColored(rgba(hex), text)
+    end, nil, false, hex)
 end
 
 local function draw_notice(text, hex)
@@ -1135,7 +1149,7 @@ local function draw_goblins(saved)
         end
     end
     if completed > 0 and saved.goldilox_time ~= saved.deadline then
-        draw_notice('Goldilox: Reward not collected.', HEX.amber)
+        draw_notice_row('Goldilox: Reward not collected.', HEX.amber)
     end
 end
 
