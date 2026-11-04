@@ -255,7 +255,8 @@ ashita.events.register('packet_in', 'tracker_packet_in', function(e)
 end)
 
 ashita.events.register('packet_out', 'tracker_packet_out', function(e)
-    if e.id == 0x0036 then
+    -- A trade another addon blocked never reaches the npc.
+    if e.id == 0x0036 and not e.blocked then
         dailies.on_trade(e.data)
     end
 end)

@@ -888,6 +888,17 @@ handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
 text_in('Quest Completed', 121)
 eq(cfg.palalumin_quests['Defeat mobs'].completed, true, 'satisfied kills complete')
 eq(cfg.palalumin_quests['Item request'].completed, true, 'same turn-in completes the items')
+
+-- A later trade elsewhere ends his window, and a blocked trade never opens it.
+cfg.palalumin_quests['Item request'].completed = nil
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
+handlers.packet_out({ id = 0x0036, data = trade_packet(600) })
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'a later trade elsewhere ends his window')
+handlers.packet_out({ id = 0x0036, data = trade_packet(1794), blocked = true })
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'a blocked trade to him is not a turn-in')
+cfg.palalumin_quests['Item request'].completed = true
 world.npcs = nil
 
 cfg.palalumin_quests['Find flux'].completed = nil
@@ -1173,6 +1184,16 @@ regime.clear()
 began = 0
 render()
 eq(began, 0, 'an empty day draws nothing')
+
+-- A saved row is a T{}, whose missing count is table.count. A Murdox row
+-- filled by "kills remain" alone has no count.
+cfg.dailies = {
+    Murdox = T{ remaining = '5', target = 'Crawlers', zone = 'East Sarutabaruta', message = 'Kill Crawlers.' },
+}
+render()
+eq(has_drawn('-5/0'), false, 'a reloaded murdox row without a count draws no meter')
+eq(dailies.goblin_line('Murdox', cfg.dailies.Murdox), 'Kill Crawlers.', 'its chat line falls back to the message')
+cfg.dailies = {}
 
 cfg.dailies = {
     Fishstix = { zone = 'Zeruhn Mines', hint = 'Far North' },
@@ -1490,14 +1511,19 @@ packet_matches(trade.build_trade(0x010F581D, 0x071D, {
     0C 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00
     29 18 02 0A 2A 47 1D 13 00 00 1D 07 08 00 00 00
 ]], '8-entry trade')
-packet_matches(trade.build_trade(0x010F581D, 0x071D, {
-    { slot = 0x44, count = 1 }, { slot = 0x3A, count = 1 }, { slot = 0x0D, count = 1 },
-}), [[
+local captured_trade = [[
     36 20 92 1A 1D 58 0F 01 01 00 00 00 01 00 00 00
     01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
     00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
     44 3A 0D 00 00 00 00 00 00 00 1D 07 03 00 00 00
-]], '3-entry trade')
+]]
+packet_matches(trade.build_trade(0x010F581D, 0x071D, {
+    { slot = 0x44, count = 1 }, { slot = 0x3A, count = 1 }, { slot = 0x0D, count = 1 },
+}), captured_trade, '3-entry trade')
+-- The recipient is read where the client's own packet keeps the npc index.
+world.npcs = { [0x071D] = 'Palalumin' }
+eq(trade.recipient(hex_to_bin(captured_trade)), 'Palalumin', 'recipient from a captured 0x036')
+world.npcs = nil
 
 local function read_u32(bytes, index)
     return bytes[index] + bytes[index + 1] * 256 + bytes[index + 2] * 65536 + bytes[index + 3] * 16777216
@@ -2013,6 +2039,47 @@ eq(cfg.palalumin_quests['Item request'].completed, nil, 'the next line with noth
 clock = clock + 3
 dailies.trade_update()
 eq(cfg.palalumin_quests['Item request'].completed, nil, 'items he hands back leave the request open')
+-- Items he hands back end the window, so his next line, as for the kills,
+-- leaves the request open.
+truthy(dailies.trade_start('Palalumin', needs), 'queue a turn-in he hands back')
+dailies.trade_update()
+clock = clock + 3
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'his line after a hand-back leaves the request open')
+
+-- A hand trade's own event holds the window however long it runs, and the
+-- window lasts 10 seconds past it.
+local function hand_trade_event()
+    handlers.packet_out({ id = 0x0036, data = trade_packet(1794) })
+    actors[10].status = 4
+    dailies.trade_update()
+end
+hand_trade_event()
+clock = clock + 30
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, true, 'a long trade event still completes the request')
+cfg.palalumin_quests['Item request'].completed = nil
+hand_trade_event()
+actors[10].status = 0
+dailies.trade_update()
+clock = clock + 9
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, true, 'his line just after the trade event still counts')
+cfg.palalumin_quests['Item request'].completed = nil
+-- A later event, as talking to him for the kills, does not hold it open.
+hand_trade_event()
+actors[10].status = 0
+dailies.trade_update()
+clock = clock + 5
+actors[10].status = 4
+dailies.trade_update()
+clock = clock + 6
+dailies.trade_update()
+text_in('Quest Completed', 121)
+eq(cfg.palalumin_quests['Item request'].completed, nil, 'a later event does not hold his window open')
+actors[10].status = 0
 truthy(dailies.trade_start('Palalumin', needs), 'queue a turn-in he keeps')
 dailies.trade_update()
 local phuabo, xzomit = holder.slots[1], holder.slots[2]

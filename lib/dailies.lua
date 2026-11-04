@@ -25,6 +25,9 @@ local cfg
 -- else, his line for the kills, or a party member's line does not.
 local pala_trade_at = nil
 local PALA_TRADE_WINDOW = 10
+-- Where that trade's event is: 'waiting' for it to start, 'open', or
+-- 'closed'. A later event does not hold the window open.
+local pala_event = nil
 -- Aether Fragments carried when the week's items went to the Aether Traveler.
 local fragments_before = nil
 local counts = nil
@@ -188,17 +191,33 @@ local function target_name()
     return ent.Name
 end
 
+local function pala_arm()
+    pala_trade_at = os.clock()
+    pala_event = 'waiting'
+end
+
+local function pala_disarm()
+    pala_trade_at = nil
+    pala_event = nil
+end
+
 -- True while this character's last trade to Palalumin can still be what his
--- "Quest Completed" is for. Runs every frame, so a long event keeps it.
+-- "Quest Completed" is for. Runs every frame, so a long event keeps it. Only
+-- the first event after the trade does: once it ends, the window runs out
+-- from its last frame whatever starts next.
 local function pala_traded()
     if pala_trade_at == nil then
         return false
     end
     local now = os.clock()
-    if trade.in_event() then
+    if trade.in_event() and pala_event ~= 'closed' then
+        pala_event = 'open'
         pala_trade_at = now
-    elseif now - pala_trade_at > PALA_TRADE_WINDOW then
-        pala_trade_at = nil
+    elseif pala_event == 'open' then
+        pala_event = 'closed'
+    end
+    if now - pala_trade_at > PALA_TRADE_WINDOW then
+        pala_disarm()
         return false
     end
     return true
@@ -277,7 +296,7 @@ local function apply_system(event)
                 end
             end
         end
-        pala_trade_at = nil
+        pala_disarm()
         return
     end
     if event.kind == 'dice' then
@@ -287,10 +306,13 @@ local function apply_system(event)
 end
 
 -- Every 0x036 this client sends, other addons' included (XIIM selling to
--- Junknix). Only one to Palalumin is a turn-in for his item request.
+-- Junknix). Only one to Palalumin is a turn-in for his item request. A trade
+-- to anyone else is newer than any to him, so it ends his window.
 function dailies.on_trade(data)
     if trade.recipient(data) == 'Palalumin' then
-        pala_trade_at = os.clock()
+        pala_arm()
+    else
+        pala_disarm()
     end
 end
 
@@ -406,10 +428,11 @@ local function goblin_status(npc, row)
     if npc == 'Fishstix' and row.zone then
         return 'Secret chest at ' .. row.zone
     end
-    if npc == 'Murdox' and row.count and row.target and row.zone then
-        local remaining = row.remaining or row.count
+    local count = own(row, 'count')
+    if npc == 'Murdox' and count and row.target and row.zone then
+        local remaining = row.remaining or count
         return 'Kill ' .. remaining .. ' more ' .. row.target .. ' at ' .. row.zone
-            .. ' (' .. row.count .. ' total)'
+            .. ' (' .. count .. ' total)'
     end
     if npc == 'Mistrix' and row.item then
         return 'Trade a signed ' .. row.item
@@ -504,14 +527,17 @@ end
 -- One attempt per frame. Once the npc keeps the items, the request is
 -- complete and its row leaves the panel. A turn-in sent to Palalumin also
 -- counts as a hand trade to him from the frame it is sent, so "Quest
--- Completed" can still close the row. Once the Aether Traveler keeps the
--- week's items, his row offers to store the fragments he gave, until he
--- keeps those too.
+-- Completed" can still close the row. Items he hands back end that, so his
+-- line for the kills does not. Once the Aether Traveler keeps the week's
+-- items, his row offers to store the fragments he gave, until he keeps those
+-- too.
 function dailies.trade_update()
     pala_traded()
     local result, npc = trade.update()
     if result == 'sent' and npc == 'Palalumin' then
-        pala_trade_at = os.clock()
+        pala_arm()
+    elseif result == 'returned' and npc == 'Palalumin' then
+        pala_disarm()
     elseif result == 'sent' and npc == P.AETHER_NPC then
         local row = open_request(npc)
         if row and not row.completed then

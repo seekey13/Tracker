@@ -1093,9 +1093,10 @@ local function draw_goblins(saved)
                     place_after(S(12), piece_w(right_text))
                     draw_command_link(right_text, COLORS.link, '/huh motion', 'Send /huh motion')
                 end)
-            elseif npc == 'Murdox' and row.count and row.target and row.zone then
-                local total = tonumber(row.count) or 0
-                local remaining = tonumber(row.remaining or row.count) or 0
+            -- rawget: a saved row is a T{}, whose missing count is table.count.
+            elseif npc == 'Murdox' and rawget(row, 'count') and row.target and row.zone then
+                local total = tonumber(rawget(row, 'count')) or 0
+                local remaining = tonumber(row.remaining or rawget(row, 'count')) or 0
                 local killed = total - remaining
                 local is_done = total > 0 and killed >= total
                 local fraction = (total > 0) and (killed / total) or 0

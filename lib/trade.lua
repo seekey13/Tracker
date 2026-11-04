@@ -412,7 +412,8 @@ end
 
 --- Send the queued trade once it is safe to. 'sent' on the frame it is sent.
 --- 'traded' on the frame the wait after it ends, when the npc kept the
---- items. Either comes with the npc's name. False otherwise.
+--- items, or 'returned' when he handed them back. Each comes with the npc's
+--- name. False otherwise.
 function trade.update()
     if run == nil then
         return false
@@ -434,6 +435,9 @@ function trade.update()
         run = nil
         if kept then
             return 'traded', npc
+        end
+        if kept == false then
+            return 'returned', npc
         end
         return false
     end
