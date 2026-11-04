@@ -1451,6 +1451,8 @@ local names = {
     [1002] = 'Xzomit Organ',
     [1003] = 'Yovra Organ',
 }
+-- Full names the client keeps as log names. GetItemByName never sees these.
+local log_names = {}
 local old_memory = AshitaCore.GetMemoryManager
 local old_resources = AshitaCore.GetResourceManager
 local old_packets = AshitaCore.GetPacketManager
@@ -1534,7 +1536,7 @@ AshitaCore.GetResourceManager = function()
             if not item_name then
                 return nil
             end
-            return { Id = id, Name = { item_name } }
+            return { Id = id, Name = { item_name }, LogNameSingular = { log_names[id] or item_name:lower() } }
         end,
     }
 end
@@ -2185,6 +2187,58 @@ holder.slots[7] = nil
 holder.slots[8] = nil
 actors[1792] = nil
 cfg.aether = nil
+world.zone = 34
+player.x, player.y = SPOT_X, SPOT_Y
+
+-- Beetrix can name his item in full where the client cuts it short. The
+-- full name is the item's log name, so it is found on the item carried.
+names[1007] = 'Sch. Testimony'
+log_names[1007] = "scholar's testimony"
+local testimony_name = "Scholar's Testimony"
+local testimony = { { name = testimony_name, needed = 1 } }
+cfg.palalumin_quests = {}
+cfg.dailies = {
+    Beetrix = {
+        message = "Go to Castle Oztroja, get a Scholar's Testimony and trade it to me!",
+        item = testimony_name,
+        zone = 'Castle Oztroja',
+    },
+}
+actors[1830] = { name = 'Beetrix', id = 17782822, flags = 0x200, dist = 0.25, status = 0, x = BEETRIX_X, y = BEETRIX_Y }
+world.zone = 245
+player.x, player.y = BEETRIX_X, BEETRIX_Y
+clock = clock + 3
+
+dailies.begin_frame()
+eq(dailies.item_count(testimony_name), 0, 'a full name with none carried counts none')
+eq(dailies.trade_button('Beetrix', testimony), nil, 'none carried draws no button')
+render()
+truthy(has_text('0/1'), 'none carried counts 0 of 1, not ?')
+
+holder.slots[9] = { Id = 1007, Count = 1, Flags = 0 }
+dailies.begin_frame()
+eq(dailies.item_count(testimony_name), 1, 'the full name counts the item carried under its short name')
+eq(dailies.item_count('sch. testimony'), 1, 'the short name counts it too')
+eq(dailies.trade_button('Beetrix', testimony), 'ready', 'the full name can be traded')
+render()
+truthy(has_text('1/1'), 'the carried testimony counts 1 of 1')
+truthy(button_at('##trade.Beetrix'), 'the carried testimony draws the button')
+
+click_id = '##trade.Beetrix'
+render()
+local testimony_sent = #captured
+handlers.d3d_present()
+eq(#captured, testimony_sent + 1, 'present sends the testimony')
+eq(read_u32(captured[#captured].data, 9), 1, 'one testimony is sent')
+eq(captured[#captured].data[49], 9, 'from the slot it is carried in')
+
+holder.slots[9] = nil
+clock = clock + 3
+dailies.trade_update()
+eq(cfg.dailies.Beetrix.status, 'complete', 'the testimony he kept completes the daily')
+dailies.begin_frame()
+eq(dailies.item_count(testimony_name), 0, 'the handed-over testimony counts none')
+actors[1830] = nil
 world.zone = 34
 player.x, player.y = SPOT_X, SPOT_Y
 

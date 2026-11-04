@@ -9,6 +9,7 @@ packet would trade again, and a whole stack would hand over more than asked.
 ]]
 
 local P = require('lib.daily_parse')
+local items = require('lib.items')
 
 local trade = {}
 
@@ -31,9 +32,6 @@ local last_sent = nil
 -- Each npc's index from the last walk, and when that walk ran.
 local known_index = {}
 local searched_at = {}
--- Item ids by name. The button asks every frame, and a name search walks the
--- whole item table.
-local item_ids = {}
 
 local function zone_id()
     local ok, zone = pcall(function()
@@ -162,35 +160,10 @@ local function find_npc(npc)
     return found_i, found_id
 end
 
-local function lookup_id(item_name)
-    if item_ids[item_name] then
-        return item_ids[item_name]
-    end
-    local ok, resources = pcall(function()
-        return AshitaCore:GetResourceManager()
-    end)
-    if not ok or resources == nil or resources.GetItemByName == nil then
-        return nil
-    end
-    for _, lang in ipairs({ 0, 1, 2, 3 }) do
-        local found, id = pcall(function()
-            local item = resources:GetItemByName(item_name, lang)
-            if item == nil then
-                return nil
-            end
-            return item.Id
-        end)
-        if found and type(id) == 'number' and id > 0 then
-            item_ids[item_name] = id
-            return id
-        end
-    end
-    return nil
-end
-
 -- `{name, needed}` rows become item ids. A row may give its id instead. One
 -- unresolved name drops the trade: guessing would put the wrong thing in the
--- packet.
+-- packet. A full name the client cuts short resolves once that item is
+-- carried, which a trade needs anyway.
 local function resolve(needs)
     if type(needs) ~= 'table' then
         return nil
@@ -202,7 +175,7 @@ local function resolve(needs)
         local count = tonumber(item.needed or item.count) or 0
         local id = tonumber(item.id)
         if (id or name ~= '') and count > 0 then
-            id = id or lookup_id(name)
+            id = id or items.id(name)
             if not id then
                 return nil
             end

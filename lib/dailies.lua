@@ -10,6 +10,7 @@ midnight. The Aether Traveler's request lasts until midnight Monday there.
 local chat = require('chat')
 local settingslib = require('settings')
 local P = require('lib.daily_parse')
+local items = require('lib.items')
 local trade = require('lib.trade')
 
 local dailies = {}
@@ -27,7 +28,6 @@ local PALA_TRADE_WINDOW = 10
 -- Aether Fragments carried when the week's items went to the Aether Traveler.
 local fragments_before = nil
 local counts = nil
-local item_ids = {}
 
 local function save()
     settingslib.save()
@@ -92,33 +92,9 @@ function dailies.roll_day()
     return true
 end
 
-local function lookup_item_id(item_name)
-    if item_ids[item_name] ~= nil then
-        return item_ids[item_name] or nil
-    end
-    local resources = AshitaCore:GetResourceManager()
-    if not resources then
-        return nil
-    end
-    for _, lang in ipairs({ 0, 1, 2, 3 }) do
-        local ok, id = pcall(function()
-            local item = resources:GetItemByName(item_name, lang)
-            if item == nil then
-                return nil
-            end
-            return item.Id
-        end)
-        if ok and type(id) == 'number' and id > 0 then
-            item_ids[item_name] = id
-            return id
-        end
-    end
-    return nil
-end
-
 -- Inventory only (container 0), locked stacks included. Slot 0 is gil, so
--- the count runs from slot 1, as a trade does. item_name may be an item id.
--- Nil when the client cannot answer yet.
+-- the count runs from slot 1, as a trade does. item_name may be an item id,
+-- or an item's short or full name. Nil when the client cannot answer yet.
 function dailies.item_count(item_name)
     local by_id = type(item_name) == 'number'
     if not by_id and (type(item_name) ~= 'string' or item_name == '') then
@@ -131,12 +107,17 @@ function dailies.item_count(item_name)
         end
         return cached
     end
-    local item_id = by_id and item_name or lookup_item_id(item_name)
+    local item_id, looked = item_name, true
+    if not by_id then
+        item_id, looked = items.id(item_name)
+    end
     if not item_id then
+        -- A full name with no carried item to match is none carried.
+        local answer = looked and 0 or false
         if counts then
-            counts[item_name] = false
+            counts[item_name] = answer
         end
-        return nil
+        return answer or nil
     end
     local inventory = AshitaCore:GetMemoryManager():GetInventory()
     if not inventory then
@@ -356,7 +337,7 @@ function dailies.on_text(e)
             return
         end
         -- The name as he wrote it when the client knows it, else the singular.
-        local item = lookup_item_id(named) and named or single
+        local item = items.id(named) and named or single
         -- Hearing the special again after the turn-in leaves it done.
         local prev = cfg.aether
         if type(prev) == 'table' and prev.completed and prev.item == item then
