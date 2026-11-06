@@ -709,6 +709,11 @@ written, single = parse.read_aether('Aether Traveler : This week I require three
 eq(single, 'Copper Box', 'es plural')
 written, single = parse.read_aether('Aether Traveler : This week I require three brass ingots. Bring them to me.')
 eq(single, 'Brass Ingot', 'only the last word is plural')
+written, single = parse.read_aether(
+    'Aether Traveler : Yes... This week I require three squares of damascene cloth. Bring them to me and you shall have the fragments.'
+)
+eq(written, 'Squares of Damascene Cloth', 'an of inside the name stays lowercase')
+eq(single, 'Square of Damascene Cloth', 'the word before of is the plural one')
 eq(parse.read_aether('Beetrix : Go to Gusgen Mines, get a Gusgen Clay and trade it to me!'), nil, 'another npc')
 eq(parse.read_aether('Aether Traveler : Welcome, traveler.'), nil, 'other aether talk')
 
@@ -2227,6 +2232,16 @@ end
 world.zone = 246
 text_in('Aether Traveler : Yes... This week I require three wyvern scales. Bring them to me and you shall have the fragments.', 9)
 eq(cfg.aether.item, 'Wyvern Scales', 'an item the client knows as written keeps that name')
+-- He names the cloth by its plural log name. The client calls it "Dama. Cloth".
+names[1008] = 'Dama. Cloth'
+log_names[1008] = 'square of damascene cloth'
+holder.slots[10] = { Id = 1008, Count = 3, Flags = 0 }
+text_in('Aether Traveler : Yes... This week I require three squares of damascene cloth. Bring them to me and you shall have the fragments.', 9)
+eq(cfg.aether.item, 'Square of Damascene Cloth', 'a plural before of names the item singular')
+dailies.begin_frame()
+eq(dailies.item_count(cfg.aether.item), 3, 'the cloth carried under its short name counts')
+holder.slots[10] = nil
+dailies.begin_frame()
 text_in('Aether Traveler : Yes... This week I require three dragon bones. Bring them to me and you shall have the fragments.', 9)
 eq(cfg.aether.item, 'Dragon Bone', 'otherwise the singular names the item')
 
