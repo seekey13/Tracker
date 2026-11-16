@@ -1318,6 +1318,30 @@ eq(count_rect(bg_rect(255)), opaque_grounds + 1, 'the scale row stays opaque whi
 eq(slider_id, '##tracker.scale', 'the scale slider shows once the cog opens it')
 eq(slider_range and slider_range[1], 0.5, 'the scale slider starts at 0.5x')
 eq(slider_range and slider_range[2], 2, 'the scale slider ends at 2x')
+-- The mirror's three settings sit under the scale row. A click sets and saves.
+local mirror_cfg = cfg.mirror
+truthy(has_text('Mirror'), 'the cog shows the mirror row')
+truthy(button_at('##mirror.off') and button_at('##mirror.leader') and button_at('##mirror.follower'),
+    'the mirror row offers off, leader, and follower')
+eq(mirror_cfg.enabled, false, 'the mirror row starts on off')
+local mirror_saves = saves
+click_id = '##mirror.follower'
+render()
+eq(mirror_cfg.enabled, true, 'clicking Follower turns the mirror on')
+eq(mirror_cfg.role, 'follower', 'and sets the role')
+eq(saves, mirror_saves + 1, 'and saves it')
+click_id = '##mirror.follower'
+render()
+eq(saves, mirror_saves + 1, 'clicking the lit setting saves nothing')
+click_id = '##mirror.leader'
+render()
+eq(mirror_cfg.role, 'leader', 'clicking Leader sets the role')
+eq(mirror_cfg.enabled, true, 'and leaves the mirror on')
+click_id = '##mirror.off'
+render()
+eq(mirror_cfg.enabled, false, 'clicking Off turns the mirror off')
+eq(mirror_cfg.role, 'leader', 'and keeps the role')
+
 local saves_before = saves
 world.slider_held = true
 slider_mode = 2

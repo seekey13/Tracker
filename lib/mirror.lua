@@ -672,6 +672,33 @@ local function on_off(value, current)
     return not current
 end
 
+--- 'off', 'leader', or 'follower': what the window's setting shows.
+function mirror.mode()
+    if cfg == nil or not cfg.enabled then
+        return 'off'
+    end
+    return cfg.role
+end
+
+--- Set all of it at once, and save. 'off' keeps the role for next time.
+function mirror.set_mode(mode)
+    if cfg == nil or (mode ~= 'off' and mode ~= 'leader' and mode ~= 'follower') then
+        return false
+    end
+    if mode == mirror.mode() then
+        return true
+    end
+    cfg.enabled = mode ~= 'off'
+    if cfg.enabled then
+        cfg.role = mode
+        transport.prime()
+    end
+    capture = nil
+    replay = nil
+    settingslib.save()
+    return true
+end
+
 --- /tracker mirror. The subcommand is args[3].
 function mirror.command(args)
     if cfg == nil then

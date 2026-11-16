@@ -7,7 +7,8 @@ progress. Hold Shift to drag. The title, close mark, frame, and the
 gaps between sections fade out until the mouse is over the window.
 A section header lines up with its rows. An open section stays opaque.
 A collapsed header fades with the frame until the mouse is over the window.
-The cog left of the close mark opens a scale slider, 0.5x to 2x. The
+The cog left of the close mark opens a scale slider, 0.5x to 2x, and the
+mirror's Off, Leader, Follower row under it. The
 window takes the new size once the slider is let go.
 ]]
 
@@ -15,6 +16,7 @@ local imgui = require('imgui')
 local settingslib = require('settings')
 local dailies = require('lib.dailies')
 local regime = require('lib.regime')
+local mirror = require('lib.mirror')
 local family = require('lib.family')
 local parse = require('lib.daily_parse')
 
@@ -685,6 +687,51 @@ function ui.set_scale(n)
     return true
 end
 
+local MIRROR_MODES = {
+    { mode = 'off', label = 'Off', tip = 'Mirror off. AMAN picks stay on this character.' },
+    { mode = 'leader', label = 'Leader', tip = 'Send this character\'s AMAN page picks to the other boxes. Never follow.' },
+    { mode = 'follower', label = 'Follower', tip = 'Pick the AMAN page the leader picks. Never send.' },
+}
+
+-- The mirror row under the scale row: one of three, and the lit one is the
+-- setting. A click sets and saves it.
+local function draw_mirror_row(pad)
+    local current = mirror.mode()
+    local dl = imgui.GetWindowDrawList()
+    imgui.BeginGroup()
+    pcall(imgui.AlignTextToFramePadding)
+    imgui.TextColored(rgba(HEX.text2), 'Mirror')
+    for _, option in ipairs(MIRROR_MODES) do
+        imgui.SameLine(0, S(option.mode == 'off' and 8 or 4))
+        local tw, th = imgui.CalcTextSize(option.label)
+        if type(tw) == 'table' then
+            th = tw.y or tw[2] or 0
+            tw = tw.x or tw[1] or 0
+        end
+        tw, th = tonumber(tw) or 0, tonumber(th) or 0
+        local w, h = tw + S(6) * 2, th + S(1) * 2
+        imgui.InvisibleButton('##mirror.' .. option.mode, { w, h })
+        local hovered = imgui.IsItemHovered()
+        local clicked = imgui.IsItemClicked(0)
+        local x1, y1 = imgui.GetItemRectMin()
+        local _, y2 = imgui.GetItemRectMax()
+        local lit = option.mode == current
+        fill(dl, x1, y1, w, h, lit and HEX.accent_lo or (hovered and HEX.hover or HEX.off), S(3), 1)
+        outline(dl, x1, y1, w, h, lit and HEX.accent or HEX.faint, S(3), 1)
+        dl:AddText({ x1 + S(6), (y1 + y2) / 2 - th / 2 }, u32(lit and HEX.white or HEX.dim), option.label)
+        if hovered then
+            show_tooltip(option.tip)
+        end
+        if clicked then
+            mirror.set_mode(option.mode)
+        end
+    end
+    imgui.EndGroup()
+    local gx1 = select(1, imgui.GetItemRectMin())
+    local gx2 = select(1, imgui.GetItemRectMax())
+    mark_width((gx2 - gx1) + pad)
+end
+
 -- The scale row under the title. It sits on a plate, so it stays opaque as
 -- an open section does. The value moves with a drag, and the window takes it
 -- up once the slider is let go.
@@ -716,6 +763,7 @@ local function draw_scale_slider()
     local x1 = select(1, imgui.GetItemRectMin())
     local x2 = select(1, imgui.GetItemRectMax())
     mark_width((x2 - x1) + pad)
+    draw_mirror_row(pad)
     section_end()
     if changed then
         ui.set_scale(buf[1])
@@ -767,7 +815,7 @@ local function draw_header()
     local cog_color = (cog_hover or ui.scale_open) and HEX.teal or HEX.dim
     glyph(dl, 'cog', cog_cx, cy, cog_color, 1.1, panel.chrome)
     if cog_hover then
-        show_tooltip('Scale')
+        show_tooltip('Settings')
     end
 
     local close_hover, close_click = hit('##tracker.close', close_cx)

@@ -14,7 +14,7 @@ The first time a character logs in, Tracker copies that character's `Goldilox-UI
 
 ## Window
 
-The panel lists Goblin Dailies, then Palalumin Quests, then Aether Traveler, then AMAN Targets. A section hides once that work is finished. Each section sits apart from the next, so its rows stay with that header. Hold Shift to drag. The title, the close mark, the frame, the gaps between sections, and a collapsed section header fade out until the mouse is over the window. An open section stays opaque. Then the whole window comes back. The cog left of the x opens a scale slider, 0.5x to 2x. The window takes the new size once the slider is let go, and the size is saved for the character. The x closes the window until the next AMAN confirm, a restored hunt, or `/tracker ui`.
+The panel lists Goblin Dailies, then Palalumin Quests, then Aether Traveler, then AMAN Targets. A section hides once that work is finished. Each section sits apart from the next, so its rows stay with that header. Hold Shift to drag. The title, the close mark, the frame, the gaps between sections, and a collapsed section header fade out until the mouse is over the window. An open section stays opaque. Then the whole window comes back. The cog left of the x opens the settings: a scale slider, 0.5x to 2x, and the Mirror setting. The window takes the new size once the slider is let go, and the size is saved for the character. Mirror is Off, Leader, or Follower; a click sets and saves it. The x closes the window until the next AMAN confirm, a restored hunt, or `/tracker ui`.
 
 Closing the window is not remembered.
 
@@ -40,7 +40,7 @@ The Aether Traveler in Port Jeuno wants three of one item each week. Hear his we
 
 Pick an AMAN page on one character and every other box on the same PC picks it too. It is off until turned on, for each character.
 
-On the character you drive:
+Set it from the cog, or by command. On the character you drive:
 
 ```
 /tracker mirror leader
