@@ -203,7 +203,7 @@ local function help()
     printf('  /tracker debug       Toggle death-packet logging')
     printf('  /tracker test <name> Test an enemy name against the regime')
     printf('  /tracker mirror      Pick one box\'s AMAN page on every box: /tracker mirror help')
-    printf('Hold Shift to drag. The frame fades until the mouse is over the window. The cog scales it. The x closes it.')
+    printf('Hold Shift to drag. The frame fades until the mouse is over the window. The cog opens scale and Mirror. The x closes it.')
     printf('/at, /goldilox and /dailies still work.')
 end
 

@@ -689,7 +689,7 @@ end
 
 local MIRROR_MODES = {
     { mode = 'off', label = 'Off', tip = 'Mirror off. AMAN picks stay on this character.' },
-    { mode = 'leader', label = 'Leader', tip = 'Send this character\'s AMAN page picks to the other boxes. Never follow.' },
+    { mode = 'leader', label = 'Leader', tip = 'Send this character\'s AMAN page picks to the other boxes.' },
     { mode = 'follower', label = 'Follower', tip = 'Pick the AMAN page the leader picks. Never send.' },
 }
 
