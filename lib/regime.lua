@@ -140,6 +140,11 @@ local HANDLERS = {
     { pattern = MESSAGES.REGIME_CANCELED, needs_active = true, fn = wipe },
 }
 
+--- True for the line a book prints when it is opened.
+function regime.is_tome_prompt(raw)
+    return type(raw) == 'string' and string.find(raw, MESSAGES.START_PROMPT) ~= nil
+end
+
 function regime.set_on_confirm(fn)
     on_confirm = fn
 end

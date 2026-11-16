@@ -1,7 +1,7 @@
 --[[
 Tracker
 Goblin dailies, Palalumin quests, the Aether Traveler's week, and AMAN
-training regimes.
+training regimes. An AMAN page picked on one box can be picked on the others.
 Copyright (c) 2026 Seekey
 https://github.com/seekey13/Tracker
 
@@ -20,6 +20,7 @@ local settings = require('settings')
 local dailies = require('lib.dailies')
 local regime = require('lib.regime')
 local packets = require('lib.packets')
+local mirror = require('lib.mirror')
 local parse = require('lib.daily_parse')
 local ui = require('lib.ui')
 
@@ -41,6 +42,12 @@ local defaults = T{
     enemies = T{},
     target_level_range = nil,
     training_area_zone = nil,
+    mirror = T{
+        enabled = false,
+        role = 'leader',
+        strict = true,
+        only = '',
+    },
 }
 
 local DAILY_KEYS = {
@@ -130,6 +137,7 @@ local function adopt(saved)
     migrate(saved)
     dailies.bind(saved)
     local restored = regime.bind(saved)
+    mirror.bind(saved)
     dailies.roll_day()
     if restored then
         ui.open()
@@ -194,6 +202,7 @@ local function help()
     printf('  /tracker clear       Clear the AMAN regime')
     printf('  /tracker debug       Toggle death-packet logging')
     printf('  /tracker test <name> Test an enemy name against the regime')
+    printf('  /tracker mirror      Pick one box\'s AMAN page on every box: /tracker mirror help')
     printf('Hold Shift to drag. The frame fades until the mouse is over the window. The cog scales it. The x closes it.')
     printf('/at, /goldilox and /dailies still work.')
 end
@@ -232,6 +241,8 @@ local function on_command(args)
         end
     elseif sub == 'dailies' then
         dailies.report()
+    elseif sub == 'mirror' then
+        mirror.command(args)
     else
         help()
     end
@@ -248,10 +259,14 @@ ashita.events.register('text_in', 'tracker_text_in', function(e)
     end
     dailies.on_text(e)
     regime.on_text(e.message, plain(e.message))
+    if regime.is_tome_prompt(e.message) then
+        mirror.on_tome_text()
+    end
 end)
 
 ashita.events.register('packet_in', 'tracker_packet_in', function(e)
     packets.handle_incoming_packet(e)
+    mirror.on_packet_in(e)
 end)
 
 ashita.events.register('packet_out', 'tracker_packet_out', function(e)
@@ -259,6 +274,7 @@ ashita.events.register('packet_out', 'tracker_packet_out', function(e)
     if e.id == 0x0036 and not e.blocked then
         dailies.on_trade(e.data)
     end
+    mirror.on_packet_out(e)
 end)
 
 ashita.events.register('command', 'tracker_command', function(e)
@@ -275,6 +291,7 @@ ashita.events.register('d3d_present', 'tracker_present', function()
     dailies.roll_day()
     ui.render()
     dailies.trade_update()
+    mirror.tick()
 end)
 
 ashita.events.register('key', 'tracker_key', function(e)
