@@ -245,14 +245,22 @@ function P.item_need(text)
 end
 
 local function title(s)
-    return (s:gsub('(%a)([%w\']*)', function(first, rest)
+    local titled = s:gsub('(%a)([%w\']*)', function(first, rest)
         return first:upper() .. rest
-    end))
+    end)
+    -- An "of" inside a name stays lowercase: "Square of Damascene Cloth".
+    return (titled:gsub('(%s)Of(%s)', '%1of%2'))
 end
 
--- "dragon bones" -> "dragon bone". Only the last word is plural.
+-- "dragon bones" -> "dragon bone". Only one word is plural: the last, or
+-- the one before "of" ("squares of damascene cloth" -> "square of damascene
+-- cloth").
 local function singular(phrase)
-    local head, last = phrase:match('^(.-)(%S+)$')
+    local noun, tail = phrase:match('^(.-%S)(%s+[Oo][Ff]%s+.+)$')
+    if noun == nil then
+        noun, tail = phrase, ''
+    end
+    local head, last = noun:match('^(.-)(%S+)$')
     if last == nil then
         return phrase
     end
@@ -264,7 +272,7 @@ local function singular(phrase)
     elseif lower:match('[^s]s$') then
         last = last:sub(1, -2)
     end
-    return head .. last
+    return head .. last .. tail
 end
 
 -- "Aether Traveler : Yes... This week I require three dragon bones. Bring

@@ -9,6 +9,7 @@ packet would trade again, and a whole stack would hand over more than asked.
 ]]
 
 local P = require('lib.daily_parse')
+local items = require('lib.items')
 
 local trade = {}
 
@@ -31,9 +32,6 @@ local last_sent = nil
 -- Each npc's index from the last walk, and when that walk ran.
 local known_index = {}
 local searched_at = {}
--- Item ids by name. The button asks every frame, and a name search walks the
--- whole item table.
-local item_ids = {}
 
 local function zone_id()
     local ok, zone = pcall(function()
@@ -55,11 +53,35 @@ local function in_event()
     return ok and status == 4
 end
 
+function trade.in_event()
+    return in_event()
+end
+
 local function clean_name(name)
     if type(name) ~= 'string' then
         return ''
     end
     return (name:gsub('%z.*', ''):gsub('%s+$', ''))
+end
+
+--- Who an outgoing 0x036 is for: the name at the npc index it carries.
+--- Nil when the packet is short or the index has no name.
+function trade.recipient(data)
+    if type(data) ~= 'string' or #data < 60 then
+        return nil
+    end
+    local index = data:byte(59) + data:byte(60) * 256
+    local ok, name = pcall(function()
+        return AshitaCore:GetMemoryManager():GetEntity():GetName(index)
+    end)
+    if not ok then
+        return nil
+    end
+    name = clean_name(name)
+    if name == '' then
+        return nil
+    end
+    return name
 end
 
 -- True in the npc's zone within 3 yalms of its spot.
@@ -138,35 +160,10 @@ local function find_npc(npc)
     return found_i, found_id
 end
 
-local function lookup_id(item_name)
-    if item_ids[item_name] then
-        return item_ids[item_name]
-    end
-    local ok, resources = pcall(function()
-        return AshitaCore:GetResourceManager()
-    end)
-    if not ok or resources == nil or resources.GetItemByName == nil then
-        return nil
-    end
-    for _, lang in ipairs({ 0, 1, 2, 3 }) do
-        local found, id = pcall(function()
-            local item = resources:GetItemByName(item_name, lang)
-            if item == nil then
-                return nil
-            end
-            return item.Id
-        end)
-        if found and type(id) == 'number' and id > 0 then
-            item_ids[item_name] = id
-            return id
-        end
-    end
-    return nil
-end
-
 -- `{name, needed}` rows become item ids. A row may give its id instead. One
 -- unresolved name drops the trade: guessing would put the wrong thing in the
--- packet.
+-- packet. A full name the client cuts short resolves once that item is
+-- carried, which a trade needs anyway.
 local function resolve(needs)
     if type(needs) ~= 'table' then
         return nil
@@ -178,7 +175,7 @@ local function resolve(needs)
         local count = tonumber(item.needed or item.count) or 0
         local id = tonumber(item.id)
         if (id or name ~= '') and count > 0 then
-            id = id or lookup_id(name)
+            id = id or items.id(name)
             if not id then
                 return nil
             end
@@ -415,7 +412,8 @@ end
 
 --- Send the queued trade once it is safe to. 'sent' on the frame it is sent.
 --- 'traded' on the frame the wait after it ends, when the npc kept the
---- items. Either comes with the npc's name. False otherwise.
+--- items, or 'returned' when he handed them back. Each comes with the npc's
+--- name. False otherwise.
 function trade.update()
     if run == nil then
         return false
@@ -437,6 +435,9 @@ function trade.update()
         run = nil
         if kept then
             return 'traded', npc
+        end
+        if kept == false then
+            return 'returned', npc
         end
         return false
     end
