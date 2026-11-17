@@ -3,7 +3,7 @@ Tracker - one AMAN book pick, repeated on every other box.
 
 The leader's talk to a Field Manual or Grounds Tome (0x01A) and the menu
 answers behind it (0x05B) are recorded, and written to the channel file once
-the menu closes. Each follower opens its own copy of the book and sends the
+the menu closes. Each follower talks to its own copy of the book and sends the
 same answers. First built for AMANTracker, from the book path of
 DiscipleOfEris's NpcInteract for Windower.
 
@@ -17,23 +17,43 @@ The answer is one 32-bit number. Page N is 2 + 16N in every zone at every
 level, 0x80000000 is the repeat box, and 0x40000000 alone is backing out.
 The packets are copied whole and only the target, zone, and menu id are
 rewritten, so all of it carries over.
+
+A follower's client never sees the book. Its answers go straight to the
+server, so a menu the client opened would sit at its first question after
+the server was done with it. The follower reads the book's menu packet and
+blocks it, and blocks the server's page updates (0x05C), as NpcInteract does.
+
+That means the follower never prints the book's text either. Two things the
+text gave come another way:
+  * A hunt in progress makes the server open a cancel prompt under the book's
+    own event: parameters 0, 0, 3 where the book sends 0, page mask, cipher.
+    The leader sends its first three, and a follower whose menu differs backs
+    out of it.
+  * A page pick carries the leader's parsed targets, and the follower's AMAN
+    panel takes them once its pick goes through.
 ]]
 
 local chat = require('chat')
 local settingslib = require('settings')
 local transport = require('lib.mirror_transport')
+local regime = require('lib.regime')
 
 local mirror = {}
 
 local OUT_ACTION = 0x01A
 local OUT_CHOICE = 0x05B
 local IN_ZONE = { [0x00A] = true, [0x00B] = true }
+local IN_EVENT_UPDATE = 0x05C
 -- Where each incoming menu packet keeps the npc, its index, the zone, and the
--- menu id. Offsets count from the start of the packet, header included.
+-- menu id. Offsets count from the start of the packet, header included. Only
+-- 0x034 carries parameters.
 local IN_MENU = {
     [0x032] = { npc = 0x04, index = 0x08, zone = 0x0A, menu = 0x0C, size = 0x10 },
-    [0x034] = { npc = 0x04, index = 0x28, zone = 0x2A, menu = 0x2C, size = 0x34 },
+    [0x034] = { npc = 0x04, index = 0x28, zone = 0x2A, menu = 0x2C, size = 0x34, params = 0x08 },
 }
+-- The first three parameters: 0, page mask, cipher. The fourth is a key item
+-- and the rest are the character's own tabs and regime, so they differ by box.
+local PARAMS_COMPARED = 12
 
 local ACTION_SIZE = 0x1C
 local ACTION_TARGET = 0x04
@@ -45,6 +65,7 @@ local CHOICE_SIZE = 0x14
 local CHOICE_TARGET = 0x04
 local CHOICE_OPTION = 0x08
 local CHOICE_INDEX = 0x0C
+local CHOICE_UPDATE = 0x0E
 local CHOICE_ZONE = 0x10
 local CHOICE_MENU = 0x12
 local BACK_OUT = 0x40000000
@@ -61,6 +82,7 @@ local STEP_DELAY = 0.3 -- between one answer and the next
 local FINISH_TIMEOUT = 8 -- for the event to close after the last answer
 local CAPTURE_TIMEOUT = 120
 local MAX_STEPS = 40
+local MAX_TARGETS = 8
 local MAX_AGE = 20 -- seconds a follower trusts a record
 
 local cfg = nil
@@ -72,8 +94,8 @@ local sequence = 0
 local capture = nil
 -- What a follower is replaying, or nil.
 local replay = nil
--- The last menu packet this client received. seq counts them.
-local menu = { seq = 0, id = 0, npc_id = 0, npc_index = 0 }
+-- The last menu packet this client received.
+local menu = { id = 0, npc_id = 0, npc_index = 0 }
 
 local function printf(fmt, ...)
     print(chat.header(addon.name) .. chat.message(('Mirror: ' .. fmt):format(...)))
@@ -221,11 +243,67 @@ local function send(id, packet)
     end)
 end
 
--- seq|time|leader|zone|level|leader id|book|text seen|0x01A|0x05B|0x05B...
+-- The menu's compared parameters, or '' for a menu that has none.
+local function menu_params(e_id, packet)
+    local layout = IN_MENU[e_id]
+    if layout == nil or layout.params == nil then
+        return ''
+    end
+    return packet:sub(layout.params + 1, layout.params + PARAMS_COMPARED)
+end
+
+-- True when the answer picks a page: 2 + 16N for pages 1 to 10.
+local function is_page_pick(raw)
+    local option = rd32(raw, CHOICE_OPTION) % 0x80000000
+    return option >= 18 and option <= 162 and (option - 2) % 16 == 0
+end
+
+-- Targets ride in one hex field: level, area, and rows of total, name, kind.
+local function encode_page(page)
+    if page == nil then
+        return ''
+    end
+    local rows = {}
+    for _, enemy in ipairs(page.enemies) do
+        local row = { tonumber(enemy.total) or 0, enemy.name or '', enemy.match_type or 'exact' }
+        rows[#rows + 1] = table.concat(row, '\29')
+    end
+    return to_hex(table.concat({ page.level or '', page.zone or '', table.concat(rows, '\30') }, '\31'))
+end
+
+-- Nil when the field is empty, false when it cannot be read.
+local function decode_page(field)
+    if field == '' then
+        return nil
+    end
+    local text = from_hex(field)
+    if text == nil then
+        return false
+    end
+    local lv, area, rows = text:match('^([^\31]*)\31([^\31]*)\31([^\31]*)$')
+    if lv == nil then
+        return false
+    end
+    local page = { level = lv ~= '' and lv or nil, zone = area ~= '' and area or nil, enemies = {} }
+    for row in (rows .. '\30'):gmatch('([^\30]*)\30') do
+        local total, name, kind = row:match('^(%d+)\29([^\29]+)\29([^\29]+)$')
+        if total == nil or (kind ~= 'exact' and kind ~= 'family') then
+            return false
+        end
+        page.enemies[#page.enemies + 1] = { total = tonumber(total), name = name, match_type = kind }
+    end
+    if #page.enemies == 0 or #page.enemies > MAX_TARGETS then
+        return false
+    end
+    return page
+end
+
+-- seq|time|leader|zone|level|leader id|book|text seen|menu params|targets|0x01A|0x05B|0x05B...
 local function encode(record)
     local parts = {
         record.seq, record.time, (record.leader:gsub('[|\r\n]', ' ')), record.zone, record.level,
-        record.self_id, record.book, record.confirmed and 1 or 0, to_hex(record.trigger),
+        record.self_id, record.book, record.confirmed and 1 or 0,
+        record.params ~= '' and to_hex(record.params) or '', encode_page(record.page), to_hex(record.trigger),
     }
     for _, raw in ipairs(record.steps) do
         parts[#parts + 1] = to_hex(raw)
@@ -238,7 +316,7 @@ local function decode(payload)
     for part in (payload .. '|'):gmatch('(.-)|') do
         parts[#parts + 1] = part
     end
-    if #parts < 10 then
+    if #parts < 12 then
         return nil, 'too few fields'
     end
     local record = {
@@ -250,7 +328,9 @@ local function decode(payload)
         self_id = tonumber(parts[6]),
         book = parts[7],
         confirmed = parts[8] == '1',
-        trigger = from_hex(parts[9]),
+        params = parts[9] ~= '' and from_hex(parts[9]) or '',
+        page = decode_page(parts[10]),
+        trigger = from_hex(parts[11]),
         steps = {},
     }
     if not (record.seq and record.time and record.zone and record.level and record.self_id) then
@@ -259,10 +339,16 @@ local function decode(payload)
     if not BOOKS[record.book] then
         return nil, 'not a book'
     end
+    if record.params == nil or (record.params ~= '' and #record.params ~= PARAMS_COMPARED) then
+        return nil, 'bad menu parameters'
+    end
+    if record.page == false then
+        return nil, 'bad targets'
+    end
     if record.trigger == nil or #record.trigger < ACTION_SIZE then
         return nil, 'bad talk packet'
     end
-    for i = 10, #parts do
+    for i = 12, #parts do
         local raw = from_hex(parts[i])
         if raw == nil or #raw < CHOICE_SIZE then
             return nil, 'bad answer packet'
@@ -281,6 +367,19 @@ end
 
 local function is_follower()
     return cfg ~= nil and cfg.enabled == true and cfg.role == 'follower'
+end
+
+-- The leader's targets when this visit showed a page and picked it.
+local function picked_page(done)
+    if not is_page_pick(done.steps[#done.steps]) or regime.parses() == done.parses then
+        return nil
+    end
+    local view = regime.view()
+    if not view.is_active or type(view.enemies) ~= 'table' or #view.enemies == 0
+        or #view.enemies > MAX_TARGETS then
+        return nil
+    end
+    return { level = view.target_level_range, zone = view.training_area_zone, enemies = view.enemies }
 end
 
 -- The leader's menu closed. Write the record when it was a pick at a book.
@@ -303,6 +402,7 @@ local function finish_capture()
     end
     local me = self_info()
     sequence = sequence + 1
+    local page = picked_page(done)
     local sent = transport.publish(encode({
         seq = sequence,
         time = os.time(),
@@ -312,11 +412,14 @@ local function finish_capture()
         self_id = me and me.id or 0,
         book = done.book,
         confirmed = done.confirmed,
+        params = done.params or '',
+        page = page,
         trigger = done.trigger,
         steps = done.steps,
     }))
     if sent then
-        printf('sent %d answer%s from the %s.', #done.steps, #done.steps == 1 and '' or 's', done.book)
+        printf('sent %d answer%s from the %s%s.', #done.steps, #done.steps == 1 and '' or 's', done.book,
+            page and ' with its targets' or '')
     else
         printf('could not write the channel file (%s).', transport.last_error() or 'unknown error')
     end
@@ -334,16 +437,16 @@ local function back_out_packet()
         .. put16('\0\0', 0, menu.id)
 end
 
--- Stop a replay. A follower left inside the book's menu is backed out of it.
+-- Stop a replay. The client never saw the book, so an event still open on
+-- the server is backed out of whatever the client's status reads.
 local function abort(fmt, ...)
     if replay == nil then
         return
     end
-    -- Before the talk is sent, any open menu is the player's own.
-    local talked = replay.state ~= 'pending'
+    local open = replay.open
     printf('stopped at answer %d of %d: ' .. fmt, replay.index, #replay.steps, ...)
     replay = nil
-    if talked and status() == STATUS_EVENT and menu.npc_id ~= 0 then
+    if open and menu.npc_id ~= 0 then
         send(OUT_CHOICE, back_out_packet())
     end
 end
@@ -393,10 +496,11 @@ local function start_replay(record)
         leader = record.leader,
         book = book,
         trigger = put16(put32(record.trigger, ACTION_TARGET, book.id), ACTION_INDEX, book.index),
-        -- An active hunt opens a cancel prompt under the book's own menu id.
-        -- The A.M.A.N. line is what tells the book's menu from that one.
-        need_text = cfg.strict and record.confirmed,
-        confirmed = false,
+        -- Book menus received and blocked since the talk went out.
+        menus = 0,
+        -- True while the server holds an event this client never saw.
+        open = false,
+        params = '',
         -- Boxes start a little apart instead of all in one frame.
         at = os.clock() + (me.id % 5) * 0.1,
     }
@@ -434,47 +538,61 @@ local function same_menu()
     return true
 end
 
+-- A hunt in progress opens a cancel prompt under the book's own menu id.
+-- Its parameters are not the book's, so strict backs out of it.
+local function same_params()
+    local theirs = replay.record.params
+    if not cfg.strict or theirs == '' or replay.params == '' or replay.params == theirs then
+        return true
+    end
+    abort('the %s opened a different menu than %s\'s did. A hunt in progress opens one.',
+        replay.record.book, replay.leader)
+    return false
+end
+
 local function step_replay(now)
     if replay.state == 'pending' then
         if now < replay.at then
             return
         end
-        replay.mark = menu.seq
         replay.state = 'wait_menu'
         replay.deadline = now + MENU_TIMEOUT
         send(OUT_ACTION, replay.trigger)
     elseif replay.state == 'wait_menu' then
-        if menu.seq > replay.mark and (replay.confirmed or not replay.need_text) then
-            if same_menu() then
+        if replay.menus > 0 then
+            if same_menu() and same_params() then
                 replay.state = 'answer'
                 replay.at = now + FIRST_DELAY
             end
         elseif now > replay.deadline then
-            if menu.seq > replay.mark then
-                abort('the menu that opened never printed the A.M.A.N. line, so it is not the page list.')
-            else
-                abort('the book never opened.')
-            end
+            abort('the book never opened.')
         end
     elseif replay.state == 'answer' then
         if now < replay.at or not same_menu() then
             return
         end
-        send(OUT_CHOICE, own_choice(replay.steps[replay.index]))
+        local raw = replay.steps[replay.index]
+        send(OUT_CHOICE, own_choice(raw))
+        -- An update leaves the event open. Anything else ends it.
+        replay.open = raw:byte(CHOICE_UPDATE + 1) ~= 0
         if replay.index < #replay.steps then
             replay.index = replay.index + 1
             replay.at = now + STEP_DELAY
         else
             replay.state = 'finish'
-            replay.mark = menu.seq
+            replay.mark = replay.menus
             replay.deadline = now + FINISH_TIMEOUT
         end
     elseif replay.state == 'finish' then
-        if status() == STATUS_IDLE then
+        if replay.menus > replay.mark then
+            abort('another menu opened after the last answer %s gave.', replay.leader)
+        elseif status() == STATUS_IDLE then
+            local page = replay.record.page
             printf('followed %s.', replay.leader)
             replay = nil
-        elseif menu.seq > replay.mark then
-            abort('another menu opened after the last answer %s gave.', replay.leader)
+            if page ~= nil then
+                regime.adopt(page)
+            end
         elseif now > replay.deadline then
             abort('the menu never closed.')
         end
@@ -502,13 +620,11 @@ function mirror.bind(saved)
     transport.prime()
 end
 
---- The book's "placed here by the A.M.A.N." line was printed.
+--- The book's "placed here by the A.M.A.N." line was printed. Only the
+--- leader sees it: a follower's book never opens on its screen.
 function mirror.on_tome_text()
     if capture ~= nil then
         capture.confirmed = true
-    end
-    if replay ~= nil then
-        replay.confirmed = true
     end
 end
 
@@ -545,14 +661,17 @@ function mirror.on_packet_out(e)
         capture = {
             at = os.clock(),
             book = name,
+            target = rd32(packet, ACTION_TARGET),
             zone = zone_id(),
             trigger = packet,
             steps = {},
             confirmed = false,
             in_event = false,
+            params = nil,
+            parses = regime.parses(),
         }
         if dump then
-            printf('talk to the %s (id %d, index %d) %s', name, rd32(packet, ACTION_TARGET), index, to_hex(packet))
+            printf('talk to the %s (id %d, index %d) %s', name, capture.target, index, to_hex(packet))
         end
     elseif capture ~= nil and #packet >= CHOICE_SIZE then
         if #capture.steps >= MAX_STEPS then
@@ -568,7 +687,8 @@ function mirror.on_packet_out(e)
     end
 end
 
---- Incoming packets: the menu this client was just shown, and zoning.
+--- Incoming packets: the menu this client was just sent, and zoning. A
+--- follower's book menu and page updates are blocked here.
 function mirror.on_packet_in(e)
     if cfg == nil or not cfg.enabled then
         return
@@ -579,13 +699,26 @@ function mirror.on_packet_in(e)
         if type(packet) ~= 'string' or #packet < layout.size then
             return
         end
-        menu.seq = menu.seq + 1
         menu.npc_id = rd32(packet, layout.npc)
         menu.npc_index = rd16(packet, layout.index)
         menu.id = rd16(packet, layout.menu)
+        local params = menu_params(e.id, packet)
         if dump then
-            printf('menu 0x%03X npc %d index %d zone %d menu %d', e.id, menu.npc_id, menu.npc_index,
-                rd16(packet, layout.zone), menu.id)
+            printf('menu 0x%03X npc %d index %d zone %d menu %d params %s', e.id, menu.npc_id, menu.npc_index,
+                rd16(packet, layout.zone), menu.id, params ~= '' and to_hex(params) or 'none')
+        end
+        if capture ~= nil and capture.params == nil and menu.npc_id == capture.target then
+            capture.params = params
+        end
+        if replay ~= nil and replay.state ~= 'pending' and menu.npc_id == replay.book.id then
+            e.blocked = true
+            replay.menus = replay.menus + 1
+            replay.open = true
+            replay.params = params
+        end
+    elseif e.id == IN_EVENT_UPDATE then
+        if replay ~= nil and replay.state ~= 'pending' then
+            e.blocked = true
         end
     elseif IN_ZONE[e.id] then
         if replay ~= nil then
@@ -593,7 +726,7 @@ function mirror.on_packet_in(e)
         end
         replay = nil
         capture = nil
-        menu.seq, menu.id, menu.npc_id, menu.npc_index = 0, 0, 0, 0
+        menu.id, menu.npc_id, menu.npc_index = 0, 0, 0
     end
 end
 
@@ -657,7 +790,7 @@ local function help()
     printf('  /tracker mirror leader        Send this character\'s picks. Never follow')
     printf('  /tracker mirror follower      Follow the leader\'s picks. Never send')
     printf('  /tracker mirror only <name>   Follow only <name>. "any" follows every leader')
-    printf('  /tracker mirror strict on|off Require the book\'s A.M.A.N. line. On by default')
+    printf('  /tracker mirror strict on|off Check it is the book\'s own menu on both boxes. On by default')
     printf('  /tracker mirror stop          Stop following the current pick')
     printf('  /tracker mirror dump          Toggle packet logging')
 end

@@ -5,7 +5,7 @@ Ashita gives one client no way to message another, so a pick travels through
 config\addons\Tracker\mirror_channel.txt. Only clients that share that folder
 see each other. The file holds one record:
 
-    TRACKER-MIRROR-1|<payload>
+    TRACKER-MIRROR-2|<payload>
     #END
 
 A reader that catches the file half written finds no #END, drops it, and
@@ -14,7 +14,9 @@ reads the whole record on its next poll.
 
 local transport = {}
 
-local PROTOCOL = 'TRACKER-MIRROR-1'
+-- 2 added the leader's menu parameters and page targets. A box still on 1
+-- ignores a 2 record rather than misreading it.
+local PROTOCOL = 'TRACKER-MIRROR-2'
 local TERMINATOR = '#END'
 
 local channel_path = nil

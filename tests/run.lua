@@ -2503,10 +2503,31 @@ local function mirror_checks()
         return '\91\10\1\2' .. le32(17000500) .. le32(option) .. le16(500)
             .. string.char(update and 1 or 0) .. '\0' .. le16(245) .. le16(menu_id or 61)
     end
-    local function menu_packet(index, menu_id)
-        return '\52\26\0\0' .. le32(ents[index].id) .. string.rep('\0', 32) .. le16(index) .. le16(245)
+    -- The book opens with 0, a page mask, the cipher, a key item, then the
+    -- character's own tabs and regime. A hunt opens 0, 0, 3 instead.
+    local LEADER_PARAMS = { 0, 0x600, 0, 1, 0, 0, 900, 12 }
+    local ALT_PARAMS = { 0, 0x600, 0, 0, 0, 0, 40, 0 }
+    local HUNT_PARAMS = { 0, 0, 3, 1, 0, 0, 40, 5 }
+    local function menu_packet(index, menu_id, params)
+        local blob = ''
+        for i = 1, 8 do
+            blob = blob .. le32((params or ALT_PARAMS)[i])
+        end
+        return '\52\26\0\0' .. le32(ents[index].id) .. blob .. le16(index) .. le16(245)
             .. le16(menu_id) .. string.rep('\0', 6)
     end
+    -- One incoming menu packet. The event comes back so blocking can be read.
+    local function menu_in(instance, index, menu_id, params)
+        local e = { id = 0x034, data = menu_packet(index, menu_id, params), blocked = false }
+        instance.on_packet_in(e)
+        return e
+    end
+    local function update_in(instance)
+        local e = { id = 0x05C, data = string.rep('\0', 0x24), blocked = false }
+        instance.on_packet_in(e)
+        return e
+    end
+    local regime = require('lib.regime')
     local function fresh(role)
         package.loaded['lib.mirror'] = nil
         package.loaded['lib.mirror_transport'] = nil
@@ -2537,20 +2558,33 @@ local function mirror_checks()
     local leader, leader_cfg = fresh('leader')
     local channel = temp .. '\\config\\addons\\Tracker\\mirror_channel.txt'
 
-    -- The leader looks at page 1, then picks it with the repeat box ticked.
+    -- The leader looks at page 1, reads it, then picks it with the repeat box
+    -- ticked. opts.option buys from the book instead.
+    local leader_menu = nil
     local function lead_pick(opts)
         opts = opts or {}
         who = lead
         out(leader, 0x01A, talk(opts.npc or 500, opts.category))
+        leader_menu = menu_in(leader, opts.npc or 500, 61, LEADER_PARAMS)
         if opts.text ~= false then
             leader.on_tome_text()
+            regime.on_text("This Field Manual has been placed here by the Adventurers' Mutual Aid Network (A.M.A.N.).")
         end
         ents[10].status = 4
         tick(leader)
         if opts.back_out then
             out(leader, 0x05B, choice(0x40000000, false))
+        elseif opts.option then
+            out(leader, 0x05B, choice(opts.option, true))
+            out(leader, 0x05B, choice(opts.option, false))
         else
             out(leader, 0x05B, choice(0x12, true))
+            if opts.page_text ~= false then
+                regime.on_text('The information on this page instructs you to defeat the following:')
+                regime.on_text('5 Donjon Bats. 3 Fallen Mages.')
+                regime.on_text('Target level range: 48~49.')
+                regime.on_text('Training area: Garlaige Citadel.')
+            end
             out(leader, 0x05B, choice(0x80000012, false))
         end
         ents[10].status = 0
@@ -2585,15 +2619,17 @@ local function mirror_checks()
     eq(channel_text(), nil, 'injected packets are not recorded')
 
     lead_pick()
-    truthy(printed('sent 2 answers from the Field Manual'), 'the pick is sent once the menu closes')
+    truthy(printed('sent 2 answers from the Field Manual with its targets'), 'the pick is sent once the menu closes')
+    eq(leader_menu.blocked, false, 'the leader\'s own menu is never blocked')
     local body = channel_text() or ''
-    truthy(body:find('TRACKER-MIRROR-1|', 1, true) == 1, 'the record names its protocol')
+    truthy(body:find('TRACKER-MIRROR-2|', 1, true) == 1, 'the record names its protocol')
     truthy(body:find('#END', 1, true), 'the record ends with its sentinel')
     eq(#sent, 0, 'the leader injects nothing')
     tick(leader)
     eq(#sent, 0, 'the leader never follows its own record')
 
-    -- The alt opens its own manual and waits for that menu.
+    -- The alt talks to its own manual. Its client never sees that menu.
+    regime.clear()
     who = alt
     tick(follower)
     truthy(printed('following Leader: 2 answers'), 'the follower takes the record')
@@ -2607,12 +2643,11 @@ local function mirror_checks()
     eq(sent[1].data[13], 7, 'the rest of the talk is the leader\'s')
     tick(follower)
     eq(#sent, 1, 'nothing is answered before the menu opens')
-    ents[20].status = 4
-    follower.on_packet_in({ id = 0x034, data = menu_packet(600, 61) })
-    tick(follower)
+    eq(menu_in(follower, 700, 61).blocked, false, 'another npc\'s menu reaches the client')
     tick(follower, 1)
-    eq(#sent, 1, 'strict: nothing is answered before the book prints its line')
-    follower.on_tome_text()
+    eq(#sent, 1, 'another npc\'s menu is not the book\'s')
+    ents[20].status = 4
+    eq(menu_in(follower, 600, 61).blocked, true, 'the book\'s menu never reaches the alt\'s client')
     tick(follower)
     eq(#sent, 1, 'the first answer waits a moment after the menu')
     tick(follower, 0.2)
@@ -2624,6 +2659,7 @@ local function mirror_checks()
     eq(read_u16(sent[2].data, 13), 600, 'the answer carries the alt\'s manual index')
     eq(sent[2].data[15], 1, 'looking at a page stays an update')
     eq(read_u16(sent[2].data, 19), 61, 'the answer names the alt\'s menu')
+    eq(update_in(follower).blocked, true, 'the page the server sends back never reaches the alt\'s client')
     tick(follower, 0.1)
     eq(#sent, 2, 'the next answer waits its turn')
     -- No menu packet comes between answers; the second goes out on time alone.
@@ -2639,37 +2675,81 @@ local function mirror_checks()
     tick(follower, 1)
     eq(#sent, 3, 'one record is followed once')
 
+    -- The alt never saw the page, so the leader's targets come with it.
+    local adopted = regime.view()
+    eq(adopted.is_active, true, 'the follower\'s regime is active')
+    eq(#adopted.enemies, 2, 'the follower takes both targets')
+    eq(adopted.enemies[1].name, 'Donjon Bats', 'the first target')
+    eq(adopted.enemies[1].total, 5, 'its count')
+    eq(adopted.enemies[1].killed, 0, 'none killed yet')
+    eq(adopted.enemies[2].name, 'Fallen Mages', 'the second target')
+    eq(adopted.target_level_range, '48~49', 'the level range')
+    eq(adopted.training_area_zone, 'Garlaige Citadel', 'the training area')
+    truthy(printed('Active Training: 5 Donjon Bats, 3 Fallen Mages in Garlaige Citadel'), 'the follower prints the regime')
+    eq(update_in(follower).blocked, false, 'with nothing being followed, page updates pass')
+    eq(menu_in(follower, 600, 61).blocked, false, 'the player\'s own visit to the book is left alone')
+
     -- A different menu id is not answered, and the alt is backed out of it.
+    -- The alt's client never entered the event, so its status reads idle.
     lead_pick()
     who = alt
     tick(follower)
     tick(follower, 1)
     eq(#sent, 4, 'the next pick opens the book again')
-    ents[20].status = 4
-    follower.on_packet_in({ id = 0x034, data = menu_packet(600, 99) })
-    follower.on_tome_text()
+    menu_in(follower, 600, 99)
     tick(follower)
     eq(#sent, 5, 'a different menu sends one packet')
     eq(read_u32(sent[5].data, 9), 0x40000000, 'and that packet backs out')
     eq(read_u16(sent[5].data, 19), 99, 'of the menu the alt is in')
     eq(sent[5].data[15], 0, 'backing out ends the event')
     truthy(printed('this menu is 99 and Leader answered menu 61'), 'the follower says the menus differ')
-    ents[20].status = 0
     tick(follower, 1)
     eq(#sent, 5, 'a stopped replay sends nothing more')
 
-    -- An active hunt opens a prompt under the same menu id. It never prints
-    -- the book's line, so it is backed out of, not answered.
+    -- An active hunt opens a cancel prompt under the same menu id: 0, 0, 3
+    -- where the book sends 0, its page mask, its cipher. It is backed out of.
     lead_pick()
     who = alt
     tick(follower)
     tick(follower, 1)
-    ents[20].status = 4
-    follower.on_packet_in({ id = 0x034, data = menu_packet(600, 61) })
-    tick(follower, 6)
-    eq(#sent, 7, 'a menu with no A.M.A.N. line gets the talk and one more packet')
+    menu_in(follower, 600, 61, HUNT_PARAMS)
+    tick(follower)
+    eq(#sent, 7, 'a hunt\'s prompt gets the talk and one more packet')
     eq(read_u32(sent[7].data, 9), 0x40000000, 'which backs out')
-    ents[20].status = 0
+    truthy(printed('A hunt in progress opens one'), 'the follower says why')
+
+    -- Strict off answers whatever opens.
+    follower_cfg.strict = false
+    lead_pick()
+    who = alt
+    tick(follower)
+    tick(follower, 1)
+    menu_in(follower, 600, 61, HUNT_PARAMS)
+    tick(follower)
+    tick(follower, 0.2)
+    tick(follower, 0.3)
+    eq(#sent, 10, 'strict off: the talk and both answers go out')
+    eq(read_u32(sent[10].data, 9), 0x80000012, 'and the last is the pick')
+    tick(follower)
+    follower_cfg.strict = true
+
+    -- Food from the book carries no targets, and the follower's page stays.
+    lead_pick({ option = 196 })
+    truthy(printed('sent 2 answers from the Field Manual.'), 'a purchase is sent without targets')
+    who = alt
+    tick(follower)
+    tick(follower, 1)
+    menu_in(follower, 600, 61)
+    tick(follower)
+    tick(follower, 0.2)
+    tick(follower, 0.3)
+    eq(read_u32(sent[#sent].data, 9), 196, 'the follower buys the same food')
+    tick(follower)
+    eq(regime.view().enemies[1].name, 'Donjon Bats', 'a purchase leaves the follower\'s page alone')
+
+    -- A pick whose page text the leader never read carries no targets.
+    lead_pick({ page_text = false })
+    truthy((channel_text() or ''):find('||1A0E0102', 1, true), 'the record\'s targets field is empty')
 
     local before = #sent
     lead_pick()
@@ -2754,10 +2834,10 @@ local function mirror_checks()
     eq(#sent, before + 2, 'a record written before the follower started is ignored')
 
     -- A half-written file is skipped until it is whole.
-    write_file(channel, 'TRACKER-MIRROR-1|1|2|Leader|245')
+    write_file(channel, 'TRACKER-MIRROR-2|1|2|Leader|245')
     tick(late)
     eq(#sent, before + 2, 'a record with no sentinel is not read')
-    write_file(channel, 'TRACKER-MIRROR-1|junk\n#END\n')
+    write_file(channel, 'TRACKER-MIRROR-2|junk\n#END\n')
     tick(late)
     truthy(printed('ignored a record it could not read'), 'a record that does not parse is reported')
 

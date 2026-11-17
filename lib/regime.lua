@@ -37,6 +37,9 @@ local state = {
     pending = {},
 }
 local debug_on = false
+-- Pages read since load. The mirror compares it before and after a visit to
+-- tell whether this visit showed a page.
+local parses = 0
 
 local function printf(fmt, ...)
     print(chat.header(addon.name) .. chat.message(fmt:format(...)))
@@ -70,6 +73,7 @@ end
 
 -- A new tome page replaces whatever regime was saved, then parsing begins.
 local function start_parsing()
+    parses = parses + 1
     wipe()
     state.is_active = true
     state.is_parsing = true
@@ -139,6 +143,32 @@ local HANDLERS = {
     { pattern = MESSAGES.REGIME_CONFIRMED, needs_active = true, fn = confirm },
     { pattern = MESSAGES.REGIME_CANCELED, needs_active = true, fn = wipe },
 }
+
+function regime.parses()
+    return parses
+end
+
+--- Take a page another box picked. A mirror follower never sees the page
+--- text, so the leader's targets come with the pick. False when there are none.
+function regime.adopt(page)
+    if type(page) ~= 'table' or type(page.enemies) ~= 'table' or #page.enemies == 0 then
+        return false
+    end
+    wipe()
+    state.is_active = true
+    for _, enemy in ipairs(page.enemies) do
+        state.enemies[#state.enemies + 1] = {
+            total = tonumber(enemy.total) or 0,
+            killed = 0,
+            name = enemy.name,
+            match_type = enemy.match_type,
+        }
+    end
+    state.target_level_range = page.level
+    state.training_area_zone = page.zone
+    confirm()
+    return true
+end
 
 --- True for the line a book prints when it is opened.
 function regime.is_tome_prompt(raw)

@@ -54,7 +54,7 @@ On every other box:
 /tracker mirror on
 ```
 
-Stand each box within 6 yalms of a Field Manual or Grounds Tome in the same zone. They need not share one manual. Pick a page on the leader. When its menu closes, each follower opens its own book and sends the same answers, about a second behind. The repeat box carries over. A follower's Tracker then reads the page as if you had picked it there.
+Stand each box within 6 yalms of a Field Manual or Grounds Tome in the same zone. They need not share one manual. Pick a page on the leader. When its menu closes, each follower talks to its own book and sends the same answers, about a second behind. A follower's book never opens on its screen, so nothing is left to close. The repeat box carries over, and so does food or a buff bought from the book. A page pick also carries the leader's targets, and each follower's AMAN section shows them once its pick goes through.
 
 A leader never follows, and leader is the role a character starts with. A follower never sends.
 
@@ -68,7 +68,7 @@ A leader never follows, and leader is the role a character starts with. A follow
 
 Only a talk to a Field Manual or Grounds Tome is recorded. Trades, shops, and other npcs are never sent. Backing out of the book sends nothing.
 
-With strict on, the leader sends a pick only when the book printed its "placed here by the A.M.A.N." line, and a follower answers only after its own book prints it. A follower with a hunt in progress gets a cancel prompt where the page list should be. That prompt does not print the line, so the follower backs out of it. Strict off drops both checks.
+With strict on, the leader sends a pick only when the book printed its "placed here by the A.M.A.N." line, and a follower answers only when its book opens the same menu the leader's did. A follower with a hunt in progress gets a cancel prompt where the page list should be. That prompt opens differently, so the follower backs out of it. Strict off drops both checks.
 
 A follower does nothing, and says why, when it is in another zone, has no book within 6 yalms, is already in a menu, or the pick is more than 20 seconds old. When its menu is not the one the leader answered, it backs out and picks nothing.
 
