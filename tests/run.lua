@@ -161,6 +161,7 @@ local settings_path = 'R:\\CatsEyeXI\\catseyexi-client\\Vanacore\\config\\addons
 local listeners = {}
 local saves = 0
 local loaded = nil
+local last_defaults = nil
 
 -- Ashita's settings save stops at a function anywhere in the settings.
 local function function_in(value, path, seen)
@@ -187,7 +188,9 @@ local settings = {
     register = function(_, _, fn)
         listeners[#listeners + 1] = fn
     end,
+    -- Like Ashita's merge, a key the file lacks is the defaults' own table.
     load = function(defaults)
+        last_defaults = defaults
         local saved = {}
         for key, value in pairs(defaults) do
             saved[key] = value
@@ -595,6 +598,15 @@ return settings
     eq(used.dailies.Fishstix.zone, 'Stay', 'used dailies stay')
     eq(used.opacity, 15, 'used opacity stays')
     eq(regime.view().enemies[1].name, 'Keep Me', 'rebind follows the character table')
+
+    local trial_only = {
+        migrated = false,
+        trials = { { number = 1010, remaining = 5, total = 10 } },
+    }
+    listeners[1](trial_only)
+    eq(trial_only.migrated, true, 'a profile with only trials is marked migrated')
+    eq(trial_only.dailies.Fishstix, nil, 'a profile with only trials is not overwritten by the import')
+    eq(trial_only.trials[1].number, 1010, 'its trial stays')
 
     tracker.on_command({ '/tracker', 'help' })
     wipe()
@@ -1501,6 +1513,17 @@ eq(#trials.list(), 1, 'a trial line adds its trial')
 eq(trials.list()[1].number, 1010, 'the row keeps the trial number')
 eq(trials.list()[1].remaining, 155, 'the row keeps what is left')
 eq(trials.list()[1].total, 156, 'the first line heard follows the first objective')
+
+-- Another character whose file has no trials yet starts with none of these.
+local first_profile = loaded
+settings.load(last_defaults)
+eq(#trials.list(), 0, 'another character does not see these trials')
+for _, fn in ipairs(listeners) do
+    fn(first_profile)
+end
+loaded = first_profile
+eq(#trials.list(), 1, 'the first character keeps its trial')
+
 began = 0
 render()
 eq(began, 1, 'a trial alone opens the panel')
@@ -1520,6 +1543,12 @@ eq(trials.list()[1].total, 500, 'a total below what is left is refused')
 truthy(printed('more than 100 objectives left'), 'the refusal says why')
 command({ '/tracker', 'trial', 'abc' })
 truthy(printed('Usage: /tracker trial <number> <total>'), 'trial usage')
+for _, odd in ipairs({ 'inf', '1e3', '0x10', '-5', '0' }) do
+    lines = {}
+    command({ '/tracker', 'trial', '1010', odd })
+    truthy(printed('Usage: /tracker trial <number> <total>'), 'a total of ' .. odd .. ' is refused')
+end
+eq(trials.list()[1].total, 500, 'a refused total leaves the total')
 text_in('[11:21:20] Trial 2020: 1 objective remains.', 0)
 text_in('(Seekey) Trial 3030: 5 objectives remain.', 0)
 eq(#trials.list(), 2, 'a second trial is its own row, and typed chat is not one')

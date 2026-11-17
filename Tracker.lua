@@ -42,7 +42,9 @@ local defaults = T{
     enemies = T{},
     target_level_range = nil,
     training_area_zone = nil,
-    trials = T{},
+    -- No trials key: settings merge would hand every older file this same
+    -- table, and one character's trials would reach the next. trials.bind
+    -- gives each character its own.
 }
 
 local DAILY_KEYS = {
@@ -207,9 +209,13 @@ local function help()
     printf('/at, /goldilox and /dailies still work.')
 end
 
+-- Digits only: tonumber also reads inf, 1e3 and 0x10.
 local function whole(text)
+    if type(text) ~= 'string' or not text:match('^%d+$') then
+        return nil
+    end
     local n = tonumber(text)
-    if n == nil or n < 1 or n ~= math.floor(n) then
+    if n < 1 then
         return nil
     end
     return n
