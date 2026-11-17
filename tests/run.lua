@@ -2759,6 +2759,8 @@ local function mirror_checks()
     eq(#sent, before + 2, 'a record with no sentinel is not read')
     write_file(channel, 'TRACKER-MIRROR-1|junk\n#END\n')
     tick(late)
+    eq(printed('ignored a record it could not read'), false, 'the channel is read 4 times a second, not every tick')
+    tick(late, 0.3)
     truthy(printed('ignored a record it could not read'), 'a record that does not parse is reported')
 
     -- A fresh follower for what can go wrong partway through.
@@ -2826,6 +2828,24 @@ local function mirror_checks()
     tick(second)
     tick(second, 1)
     eq(#sent, mark, 'a record with a number that is not one is never followed')
+
+    -- The book's menu packet coming again behind the pick is left alone.
+    lead_pick()
+    mark = #sent
+    open_book()
+    tick(second, 0.2)
+    tick(second, 0.3)
+    eq(#sent, mark + 3, 'the talk and both answers go out')
+    second.on_packet_in({ id = 0x034, data = menu_packet(600, 61) })
+    tick(second)
+    tick(second, 1)
+    eq(#sent, mark + 3, 'a menu packet behind the pick is not backed out of')
+    -- Only a menu still open when the wait is up is closed.
+    tick(second, 8)
+    eq(#sent, mark + 4, 'a menu still open 8 seconds on gets one packet')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out')
+    truthy(printed('and never closed'), 'and the follower says a menu stayed open')
+    ents[20].status = 0
 
     -- Turning the mirror off partway backs the follower out of the book.
     lead_pick()

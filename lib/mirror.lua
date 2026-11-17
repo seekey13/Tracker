@@ -55,6 +55,7 @@ local STATUS_EVENT = 4
 local BOOKS = { ['Field Manual'] = true, ['Grounds Tome'] = true }
 local BOOK_RANGE = 36 -- GetDistance is squared yalms; 6 yalms
 local TICK = 0.05
+local POLL = 0.25 -- between reads of the channel file
 local MENU_TIMEOUT = 5 -- for the book to open on a follower
 local FIRST_DELAY = 0.15 -- between the menu arriving and the first answer
 local STEP_DELAY = 0.3 -- between one answer and the next
@@ -66,6 +67,7 @@ local MAX_AGE = 20 -- seconds a follower trusts a record
 local cfg = nil
 local dump = false
 local next_tick = 0
+local next_poll = 0
 local sequence = 0
 
 -- What the leader is recording, or nil.
@@ -503,10 +505,14 @@ local function step_replay(now)
         if status() == STATUS_IDLE then
             printf('followed %s.', replay.leader)
             replay = nil
-        elseif menu.seq > replay.mark then
-            abort('another menu opened after the last answer %s gave.', replay.leader)
         elseif now > replay.deadline then
-            abort('the menu never closed.')
+            -- A menu packet behind the pick may be the server sending the
+            -- book's own again, so it is left alone until the wait is up.
+            if menu.seq > replay.mark then
+                abort('another menu opened after the last answer %s gave, and never closed.', replay.leader)
+            else
+                abort('the menu never closed.')
+            end
         end
     end
 end
@@ -663,7 +669,11 @@ function mirror.tick()
     if not is_follower() then
         return
     end
-    local payload = transport.poll()
+    local payload = nil
+    if now >= next_poll then
+        next_poll = now + POLL
+        payload = transport.poll()
+    end
     if payload ~= nil then
         local record, why = decode(payload)
         if record ~= nil then

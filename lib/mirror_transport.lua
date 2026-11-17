@@ -22,6 +22,9 @@ local channel_path = nil
 -- number and a time, so two picks never make the same payload.
 local last_seen = nil
 local last_error = nil
+-- The most read in one poll. A record of 40 answers is under 2 KB, and a
+-- longer file finds no #END in what was read, so it is dropped.
+local MAX_READ = 4096
 
 local function default_path()
     local install = ''
@@ -58,7 +61,7 @@ local function read_record()
     if handle == nil then
         return nil
     end
-    local body = handle:read('*a')
+    local body = handle:read(MAX_READ)
     handle:close()
     if body == nil then
         return nil
