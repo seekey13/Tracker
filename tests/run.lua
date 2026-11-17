@@ -112,6 +112,9 @@ AshitaCore = {
                     GetMemberZone = function()
                         return world.zone
                     end,
+                    GetMemberTargetIndex = function()
+                        return 0
+                    end,
                 }
             end,
             GetTarget = function()
@@ -136,6 +139,10 @@ AshitaCore = {
                     GetName = function(_, index)
                         return world.npcs[index] or ''
                     end,
+                    -- world.in_event holds the player in an npc event.
+                    GetStatus = function()
+                        return world.in_event and 4 or 0
+                    end,
                 }
             end,
         }
@@ -144,6 +151,14 @@ AshitaCore = {
         return {
             GetItemByName = function()
                 return nil
+            end,
+            -- world.items names item ids, for a Magian reward.
+            GetItemById = function(_, id)
+                local item_name = world.items and world.items[id]
+                if item_name == nil then
+                    return nil
+                end
+                return { Id = id, Name = { item_name }, LogNameSingular = { item_name:lower() } }
             end,
             GetString = function()
                 return world.zone_name
@@ -743,6 +758,11 @@ eq(heard and heard.kind, 'complete', 'the completion line')
 eq(heard and heard.number, 1010, 'the completed trial number')
 eq(trials.read('(Seekey) Trial 1010: 155 objectives remain.'), nil, 'a player typing the line is not a trial')
 eq(trials.read('Records of Eminence: Vanquish Multiple Enemies (1/200)'), nil, 'other lines are not a trial')
+heard = trials.read('Obtained: Sch. Testimony.')
+eq(heard and heard.kind, 'obtained', 'a reward line')
+eq(heard and heard.item, 'Sch. Testimony', 'the reward keeps a period inside its name')
+eq(trials.read('Obtained key item: Magian trial log.'), nil, 'a key item is not a reward')
+eq(trials.read('(Seekey) Obtained: Renegade.'), nil, 'a player typing a reward is not one')
 
 local enemies = parser.parse_enemies('5 Donjon Bats. 2 Kabooms. 3 Members of the Gigas Family.')
 eq(#enemies, 3, 'three enemies')
@@ -1505,14 +1525,15 @@ began = 0
 render()
 eq(began, 0, 'a finished day draws nothing')
 
--- Magian trials. The line gives what is left, and the first one heard sets
--- the total one past it.
+-- Magian trials. The line gives what is left. Trial 1010 is in the server's
+-- list with 200 objectives. A trial not in the list takes one past the first
+-- line heard.
 eq(#trials.list(), 0, 'no trial starts tracked')
 text_in('Trial 1010: 155 objectives remain.', 0)
 eq(#trials.list(), 1, 'a trial line adds its trial')
 eq(trials.list()[1].number, 1010, 'the row keeps the trial number')
 eq(trials.list()[1].remaining, 155, 'the row keeps what is left')
-eq(trials.list()[1].total, 156, 'the first line heard follows the first objective')
+eq(trials.list()[1].total, 200, 'a listed trial takes its total from the list')
 
 -- Another character whose file has no trials yet starts with none of these.
 local first_profile = loaded
@@ -1529,10 +1550,10 @@ render()
 eq(began, 1, 'a trial alone opens the panel')
 truthy(button_at('##fold.Trial'), 'trials sit under a Trial header')
 truthy(has_text('Trial-1010'), 'the row names the trial')
-truthy(has_text('1/156'), 'the row counts objectives done of the total')
+truthy(has_text('45/200'), 'the row counts objectives done of the total')
 text_in('\31\121Trial 1010: 154 objectives remain.', 0)
 eq(trials.list()[1].remaining, 154, 'a color byte ahead of the line')
-eq(trials.list()[1].total, 156, 'a later line keeps the total')
+eq(trials.list()[1].total, 200, 'a later line keeps the total')
 command({ '/tracker', 'trial', '1010', '500' })
 eq(trials.list()[1].total, 500, 'the command sets the total')
 render()
@@ -1553,6 +1574,7 @@ text_in('[11:21:20] Trial 2020: 1 objective remains.', 0)
 text_in('(Seekey) Trial 3030: 5 objectives remain.', 0)
 eq(#trials.list(), 2, 'a second trial is its own row, and typed chat is not one')
 eq(trials.list()[2].number, 2020, 'trials keep the order first heard')
+eq(trials.list()[2].total, 2, 'a trial not in the list takes one past the first line heard')
 
 -- A saved row reads back as T{}. The completion line must not carry a table
 -- function into the settings.
@@ -1567,22 +1589,59 @@ command({ '/tracker', 'trial' })
 truthy(printed('Trial-1010: 346/500'), 'the trial command prints progress')
 truthy(printed('Trial-2020: Complete! Report to a Magian Moogle.'), 'the trial command prints a finished trial')
 
--- Reporting is a trade to a Magian Moogle. Only that drops a finished trial.
+-- Reporting is a trade to a Magian Moogle, then its "Obtained: <reward>.".
+-- The reward names the trial. Trials 2 and 3 both give a Renegade.
+world.items = { [19333] = 'Renegade' }
+text_in('You have completed Trial 2.', 0)
+text_in('You have completed Trial 3.', 0)
+eq(trials.list()[3].total, 3, 'a listed trial finished unheard takes its total')
+render()
+truthy(has_text('3/3'), 'a listed trial finished unheard counts every objective')
 world.npcs = { [600] = 'Junknix', [700] = 'Magian Moogle' }
-handlers.packet_out({ id = 0x0036, data = trade_packet(600) })
-eq(#trials.list(), 2, 'a trade to another npc keeps a finished trial')
-handlers.packet_out({ id = 0x0036, data = trade_packet(700), blocked = true })
-eq(#trials.list(), 2, 'a blocked trade to the moogle keeps a finished trial')
 handlers.packet_out({ id = 0x0036, data = trade_packet(700) })
-eq(#trials.list(), 1, 'a trade to a Magian Moogle drops the finished trial')
+eq(#trials.list(), 4, 'the trade alone reports nothing')
+handlers.packet_out({ id = 0x0036, data = trade_packet(600) })
+text_in('Obtained: Renegade.', 0)
+eq(#trials.list(), 4, 'a trade to another npc after the moogle ends the report')
+handlers.packet_out({ id = 0x0036, data = trade_packet(700), blocked = true })
+text_in('Obtained: Renegade.', 0)
+eq(#trials.list(), 4, 'a blocked trade to the moogle reports nothing')
+handlers.packet_out({ id = 0x0036, data = trade_packet(700) })
+clock = clock + 11
+text_in('Obtained: Renegade.', 0)
+eq(#trials.list(), 4, 'a reward long after the trade reports nothing')
+handlers.packet_out({ id = 0x0036, data = trade_packet(700) })
+text_in('Obtained: Renegade.', 0)
+eq(#trials.list(), 3, 'the reward reports a finished trial')
+eq(trials.list()[3].number, 3, 'one reward reports one trial')
+eq(trials.list()[2].number, 2020, 'a finished trial with no known reward stays for a listed one')
 eq(trials.list()[1].number, 1010, 'a trial under way stays through the report')
+text_in('Obtained: Renegade.', 0)
+eq(#trials.list(), 3, 'the report ends the window')
+handlers.packet_out({ id = 0x0036, data = trade_packet(700) })
+text_in('Obtained: Bronze Sword.', 0)
+eq(#trials.list(), 2, 'a reward no listed trial gives reports a trial not in the list')
+eq(trials.list()[2].number, 3, 'the listed trial waits for its own reward')
+-- The moogle's menus can outlast the window. The event holds it open.
+handlers.packet_out({ id = 0x0036, data = trade_packet(700) })
+world.in_event = true
+for _ = 1, 3 do
+    clock = clock + 8
+    trials.update()
+end
+world.in_event = false
+trials.update()
+clock = clock + 2
+text_in('Obtained: Renegade.', 0)
+eq(#trials.list(), 1, 'a long moogle event holds the report open')
+eq(trials.list()[1].number, 1010, 'only the trial under way is left')
 world.npcs = nil
 
 text_in('You have completed Trial 1010.', 0)
 text_in('Trial 1010: 9 objectives remain.', 0)
 eq(#trials.list(), 1, 'a finished number heard again is one row')
 eq(trials.list()[1].completed, nil, 'a finished number heard again is under way')
-eq(trials.list()[1].total, 10, 'a finished number heard again starts a new total')
+eq(trials.list()[1].total, 200, 'a finished number heard again starts over at its total')
 
 command({ '/tracker', 'trial', '4040', '50' })
 eq(trials.list()[2].total, 50, 'a total can be set before the first line')

@@ -2,20 +2,33 @@
 Tracker - Magian trials.
 
 Each objective prints "Trial 1010: 155 objectives remain." (message 583).
-That line gives what is left, not the total. The first line heard for a
-trial follows its first objective, so the total is one more than that line
-leaves. /tracker trial <number> <total> sets the total for a trial already
-under way. "You have completed Trial 1010." (584) finishes the trial. Its
-row stays until a trade to a Magian Moogle reports it. Trials do not roll
-with the day.
+That line gives what is left, not the total. The total comes from the
+server's trial list in lib/trial_data.lua. For a trial not in that list, the
+first line heard is taken to follow its first objective, so the total is one
+more than that line leaves. /tracker trial <number> <total> sets a total by
+hand, and that total stays. "You have completed Trial 1010." (584) finishes
+the trial. Its row stays until a Magian Moogle takes the report: a trade to
+the moogle, then its "Obtained: <reward>." Trials do not roll with the day.
 ]]
 
 local settingslib = require('settings')
 local trade = require('lib.trade')
+local items = require('lib.items')
+local trial_data = require('lib.trial_data')
 
 local trials = {}
 
 local cfg
+
+-- When this character last traded to a Magian Moogle. Its "Obtained:
+-- <reward>." reports a finished trial only through the event that trade
+-- starts and REPORT_WINDOW seconds past it. Backing out of the reward, or a
+-- trade the moogle turns down, prints no reward, so the trial stays.
+local report_at = nil
+local REPORT_WINDOW = 10
+-- Where that trade's event is: 'waiting' for it to start, 'open', or
+-- 'closed'. A later event does not hold the window open.
+local report_event = nil
 
 local function save()
     settingslib.save()
@@ -32,6 +45,14 @@ end
 
 local function finished(row)
     return own(row, 'completed') == true or tonumber(own(row, 'remaining')) == 0
+end
+
+local function known(number)
+    local entry = trial_data[tonumber(number)]
+    if entry == nil then
+        return nil, nil
+    end
+    return entry.total, entry.reward
 end
 
 local function find(number)
@@ -92,6 +113,11 @@ function trials.read(text)
     if number then
         return { kind = 'complete', number = tonumber(number) }
     end
+    -- "Obtained key item: ..." has no colon right after Obtained.
+    local item = text:match('^[^%a]*Obtained: (.-)%.?%s*$')
+    if item and item ~= '' then
+        return { kind = 'obtained', item = item }
+    end
     return nil
 end
 
@@ -104,16 +130,80 @@ local function progress(number, remaining)
     end
     row = row or add(number)
     row.remaining = remaining
-    local total = tonumber(own(row, 'total'))
+    local total = tonumber(own(row, 'total')) or known(number)
     if total == nil or remaining >= total then
-        row.total = remaining + 1
+        total = remaining + 1
     end
+    row.total = total
 end
 
 local function complete(number)
     local row = find(number) or add(number)
     row.completed = true
     row.remaining = 0
+    if own(row, 'total') == nil then
+        row.total = known(number)
+    end
+end
+
+local function report_arm()
+    report_at = os.clock()
+    report_event = 'waiting'
+end
+
+local function report_disarm()
+    report_at = nil
+    report_event = nil
+end
+
+-- True while this character's last trade to a Magian Moogle can still be
+-- what an "Obtained:" line is for. Runs every frame, so a long event keeps
+-- it. Only the first event after the trade does.
+local function reporting()
+    if report_at == nil then
+        return false
+    end
+    local now = os.clock()
+    if trade.in_event() and report_event ~= 'closed' then
+        report_event = 'open'
+        report_at = now
+    elseif report_event == 'open' then
+        report_event = 'closed'
+    end
+    if now - report_at > REPORT_WINDOW then
+        report_disarm()
+        return false
+    end
+    return true
+end
+
+-- One reward reports one trial: the first finished trial whose reward is
+-- that item. Several trials can share a reward. A finished trial not in the
+-- list has no known reward, so a reward no listed trial matches reports the
+-- first of those.
+local function report(item)
+    local listed, unlisted
+    for _, row in ipairs(cfg.trials) do
+        if finished(row) then
+            local _, reward = known(own(row, 'number'))
+            if reward == nil then
+                unlisted = unlisted or row
+            elseif listed == nil and items.named(reward, item) then
+                listed = row
+            end
+        end
+    end
+    local reported = listed or unlisted
+    if reported == nil then
+        return false
+    end
+    for i, row in ipairs(cfg.trials) do
+        if row == reported then
+            table.remove(cfg.trials, i)
+            break
+        end
+    end
+    return true
 end
 
 -- True when the line was a trial's.
@@ -125,7 +215,12 @@ function trials.on_text(text)
     if event == nil then
         return false
     end
-    if event.kind == 'progress' then
+    if event.kind == 'obtained' then
+        if not reporting() or not report(event.item) then
+            return false
+        end
+        report_disarm()
+    elseif event.kind == 'progress' then
         progress(event.number, event.remaining)
     else
         complete(event.number)
@@ -134,26 +229,20 @@ function trials.on_text(text)
     return true
 end
 
--- Reporting a finished trial is trading its item to a Magian Moogle. Every
--- finished trial leaves then. One still under way stays.
+-- Every 0x036 this client sends. One to a Magian Moogle opens the report
+-- window. A trade to anyone else is newer, so it ends that window.
 function trials.on_trade(data)
-    if cfg == nil then
-        return
-    end
     local name = trade.recipient(data)
-    if name == nil or not name:find('Magian', 1, true) then
-        return
+    if name ~= nil and name:find('Magian', 1, true) then
+        report_arm()
+    else
+        report_disarm()
     end
-    local kept = {}
-    for _, row in ipairs(cfg.trials) do
-        if not finished(row) then
-            kept[#kept + 1] = row
-        end
-    end
-    if #kept ~= #cfg.trials then
-        cfg.trials = kept
-        save()
-    end
+end
+
+-- Every frame, so a long moogle event holds the report window open.
+function trials.update()
+    reporting()
 end
 
 -- False when the trial already has more than total objectives left.

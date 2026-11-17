@@ -331,6 +331,7 @@ ashita.events.register('d3d_present', 'tracker_present', function()
     dailies.roll_day()
     ui.render()
     dailies.trade_update()
+    trials.update()
 end)
 
 ashita.events.register('key', 'tracker_key', function(e)
