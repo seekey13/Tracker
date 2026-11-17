@@ -717,6 +717,21 @@ eq(single, 'Square of Damascene Cloth', 'the word before of is the plural one')
 eq(parse.read_aether('Beetrix : Go to Gusgen Mines, get a Gusgen Clay and trade it to me!'), nil, 'another npc')
 eq(parse.read_aether('Aether Traveler : Welcome, traveler.'), nil, 'other aether talk')
 
+local trials = require('lib.trials')
+local heard = trials.read('Trial 1010: 155 objectives remain.')
+eq(heard and heard.kind, 'progress', 'a trial line is progress')
+eq(heard and heard.number, 1010, 'the trial number')
+eq(heard and heard.remaining, 155, 'the objectives left')
+heard = trials.read('Trial 1010: 1 objective remains.')
+eq(heard and heard.remaining, 1, 'one objective left is singular')
+heard = trials.read('[11:21:20] Trial 1010: 3 objectives remain.')
+eq(heard and heard.number, 1010, 'a timestamp ahead of the trial line')
+heard = trials.read('You have completed Trial 1010.\7Report your success to a Magian Moogle.')
+eq(heard and heard.kind, 'complete', 'the completion line')
+eq(heard and heard.number, 1010, 'the completed trial number')
+eq(trials.read('(Seekey) Trial 1010: 155 objectives remain.'), nil, 'a player typing the line is not a trial')
+eq(trials.read('Records of Eminence: Vanquish Multiple Enemies (1/200)'), nil, 'other lines are not a trial')
+
 local enemies = parser.parse_enemies('5 Donjon Bats. 2 Kabooms. 3 Members of the Gigas Family.')
 eq(#enemies, 3, 'three enemies')
 eq(enemies[1].name, 'Donjon Bats', 'bats name')
@@ -1477,6 +1492,90 @@ cfg.palalumin_flagged = false
 began = 0
 render()
 eq(began, 0, 'a finished day draws nothing')
+
+-- Magian trials. The line gives what is left, and the first one heard sets
+-- the total one past it.
+eq(#trials.list(), 0, 'no trial starts tracked')
+text_in('Trial 1010: 155 objectives remain.', 0)
+eq(#trials.list(), 1, 'a trial line adds its trial')
+eq(trials.list()[1].number, 1010, 'the row keeps the trial number')
+eq(trials.list()[1].remaining, 155, 'the row keeps what is left')
+eq(trials.list()[1].total, 156, 'the first line heard follows the first objective')
+began = 0
+render()
+eq(began, 1, 'a trial alone opens the panel')
+truthy(button_at('##fold.Trial'), 'trials sit under a Trial header')
+truthy(has_text('Trial-1010'), 'the row names the trial')
+truthy(has_text('1/156'), 'the row counts objectives done of the total')
+text_in('\31\121Trial 1010: 154 objectives remain.', 0)
+eq(trials.list()[1].remaining, 154, 'a color byte ahead of the line')
+eq(trials.list()[1].total, 156, 'a later line keeps the total')
+command({ '/tracker', 'trial', '1010', '500' })
+eq(trials.list()[1].total, 500, 'the command sets the total')
+render()
+truthy(has_text('346/500'), 'the set total counts from what is left')
+lines = {}
+command({ '/tracker', 'trial', '1010', '100' })
+eq(trials.list()[1].total, 500, 'a total below what is left is refused')
+truthy(printed('more than 100 objectives left'), 'the refusal says why')
+command({ '/tracker', 'trial', 'abc' })
+truthy(printed('Usage: /tracker trial <number> <total>'), 'trial usage')
+text_in('[11:21:20] Trial 2020: 1 objective remains.', 0)
+text_in('(Seekey) Trial 3030: 5 objectives remain.', 0)
+eq(#trials.list(), 2, 'a second trial is its own row, and typed chat is not one')
+eq(trials.list()[2].number, 2020, 'trials keep the order first heard')
+
+-- A saved row reads back as T{}. The completion line must not carry a table
+-- function into the settings.
+cfg.trials[2] = T{ number = 2020, remaining = 1, total = 2 }
+text_in('You have completed Trial 2020.\7Report your success to a Magian Moogle.', 0)
+eq(cfg.trials[2].completed, true, 'the completion line finishes the trial')
+render()
+truthy(has_text('2/2'), 'a finished trial counts every objective')
+truthy(has_drawn('Report to a Magian Moogle'), 'a finished trial asks for the report')
+lines = {}
+command({ '/tracker', 'trial' })
+truthy(printed('Trial-1010: 346/500'), 'the trial command prints progress')
+truthy(printed('Trial-2020: Complete! Report to a Magian Moogle.'), 'the trial command prints a finished trial')
+
+-- Reporting is a trade to a Magian Moogle. Only that drops a finished trial.
+world.npcs = { [600] = 'Junknix', [700] = 'Magian Moogle' }
+handlers.packet_out({ id = 0x0036, data = trade_packet(600) })
+eq(#trials.list(), 2, 'a trade to another npc keeps a finished trial')
+handlers.packet_out({ id = 0x0036, data = trade_packet(700), blocked = true })
+eq(#trials.list(), 2, 'a blocked trade to the moogle keeps a finished trial')
+handlers.packet_out({ id = 0x0036, data = trade_packet(700) })
+eq(#trials.list(), 1, 'a trade to a Magian Moogle drops the finished trial')
+eq(trials.list()[1].number, 1010, 'a trial under way stays through the report')
+world.npcs = nil
+
+text_in('You have completed Trial 1010.', 0)
+text_in('Trial 1010: 9 objectives remain.', 0)
+eq(#trials.list(), 1, 'a finished number heard again is one row')
+eq(trials.list()[1].completed, nil, 'a finished number heard again is under way')
+eq(trials.list()[1].total, 10, 'a finished number heard again starts a new total')
+
+command({ '/tracker', 'trial', '4040', '50' })
+eq(trials.list()[2].total, 50, 'a total can be set before the first line')
+text_in('Trial 4040: 49 objectives remain.', 0)
+eq(trials.list()[2].total, 50, 'the first line keeps a total already set')
+
+cfg.deadline = 0
+dailies.roll_day()
+eq(#trials.list(), 2, 'trials do not roll with the day')
+
+lines = {}
+command({ '/tracker', 'trial', 'clear', '4040' })
+truthy(printed('Trial-4040 cleared.'), 'clear drops one trial')
+eq(#trials.list(), 1, 'one trial is left')
+command({ '/tracker', 'trial', 'clear', '42' })
+truthy(printed('No trial 42 is tracked.'), 'clearing an unknown trial says so')
+command({ '/tracker', 'trial', 'clear' })
+truthy(printed('Trials cleared.'), 'clear drops every trial')
+eq(#trials.list(), 0, 'no trial is left')
+began = 0
+render()
+eq(began, 0, 'no trials draws nothing')
 
 os.execute('rmdir /s /q "' .. layout_root .. '" >nul 2>&1')
 

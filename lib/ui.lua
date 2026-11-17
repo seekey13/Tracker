@@ -15,6 +15,7 @@ local imgui = require('imgui')
 local settingslib = require('settings')
 local dailies = require('lib.dailies')
 local regime = require('lib.regime')
+local trials = require('lib.trials')
 local family = require('lib.family')
 local parse = require('lib.daily_parse')
 
@@ -1390,6 +1391,31 @@ local function draw_enemies(state)
     end
 end
 
+-- Magian trials in the order first heard: the objectives done of the total.
+local function draw_trials()
+    local any_finished = false
+    for _, row in ipairs(trials.list()) do
+        local done, total, finished = trials.progress(row)
+        any_finished = any_finished or finished
+        local fraction, count_text
+        if total and total > 0 then
+            fraction = done / total
+            count_text = string.format('%d/%d', done, total)
+        else
+            fraction = finished and 1 or 0
+            count_text = finished and 'Done' or '?'
+        end
+        local label_color = progress_colors(finished)
+        local bar_color = finished and COLORS.grey_bar or nil
+        draw_bar(fraction, count_text, bar_color, function()
+            imgui.TextColored(label_color, trials.label(row))
+        end)
+    end
+    if any_finished then
+        draw_notice('Report to a Magian Moogle', HEX.teal)
+    end
+end
+
 local function has_goblin(saved)
     local rows = saved.dailies or {}
     local completed = 0
@@ -1434,6 +1460,10 @@ end
 local function has_aman()
     local state = regime.view()
     return state.is_active and type(state.enemies) == 'table' and #state.enemies > 0
+end
+
+local function has_trial()
+    return #trials.list() > 0
 end
 
 -- Layout -----------------------------------------------------------------------
@@ -1544,7 +1574,8 @@ function ui.render()
     local show_pala = has_pala(saved)
     local show_aether = has_aether(saved)
     local show_aman = has_aman()
-    if not show_goblin and not show_pala and not show_aether and not show_aman then
+    local show_trial = has_trial()
+    if not show_goblin and not show_pala and not show_aether and not show_aman and not show_trial then
         return
     end
 
@@ -1627,6 +1658,17 @@ function ui.render()
             section_begin('AMAN Targets')
             if draw_section_header('AMAN Targets') then
                 draw_enemies(regime.view())
+            end
+            section_end()
+            shown = true
+        end
+        if show_trial then
+            if shown then
+                section_gap()
+            end
+            section_begin('Trial')
+            if draw_section_header('Trial') then
+                draw_trials()
             end
             section_end()
         end
