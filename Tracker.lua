@@ -301,6 +301,7 @@ ashita.events.register('key', 'tracker_key', function(e)
 end)
 
 ashita.events.register('unload', 'tracker_unload', function()
+    mirror.unload()
     settings.save()
 end)
 

@@ -233,6 +233,15 @@ local function encode(record)
     return table.concat(parts, '|')
 end
 
+-- A number that is neither nan nor infinite, or nil.
+local function finite(text)
+    local n = tonumber(text)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
+    end
+    return n
+end
+
 local function decode(payload)
     local parts = {}
     for part in (payload .. '|'):gmatch('(.-)|') do
@@ -242,12 +251,12 @@ local function decode(payload)
         return nil, 'too few fields'
     end
     local record = {
-        seq = tonumber(parts[1]),
-        time = tonumber(parts[2]),
+        seq = finite(parts[1]),
+        time = finite(parts[2]),
         leader = parts[3],
-        zone = tonumber(parts[4]),
-        level = tonumber(parts[5]),
-        self_id = tonumber(parts[6]),
+        zone = finite(parts[4]),
+        level = finite(parts[5]),
+        self_id = finite(parts[6]),
         book = parts[7],
         confirmed = parts[8] == '1',
         trigger = from_hex(parts[9]),
@@ -259,12 +268,15 @@ local function decode(payload)
     if not BOOKS[record.book] then
         return nil, 'not a book'
     end
-    if record.trigger == nil or #record.trigger < ACTION_SIZE then
+    -- These are sent as they are read, so they must be the client's own
+    -- shapes: one talk and its answers, each at its fixed size.
+    if record.trigger == nil or #record.trigger ~= ACTION_SIZE
+        or rd16(record.trigger, ACTION_CATEGORY) ~= TALK then
         return nil, 'bad talk packet'
     end
     for i = 10, #parts do
         local raw = from_hex(parts[i])
-        if raw == nil or #raw < CHOICE_SIZE then
+        if raw == nil or #raw ~= CHOICE_SIZE then
             return nil, 'bad answer packet'
         end
         record.steps[#record.steps + 1] = raw
@@ -339,11 +351,12 @@ local function abort(fmt, ...)
     if replay == nil then
         return
     end
-    -- Before the talk is sent, any open menu is the player's own.
-    local talked = replay.state ~= 'pending'
+    -- Only a menu that arrived after the talk is this replay's to close. Any
+    -- other is the player's own, or one seen before the talk.
+    local opened = replay.opened
     printf('stopped at answer %d of %d: ' .. fmt, replay.index, #replay.steps, ...)
     replay = nil
-    if talked and status() == STATUS_EVENT and menu.npc_id ~= 0 then
+    if opened and status() == STATUS_EVENT and menu.npc_id ~= 0 then
         send(OUT_CHOICE, back_out_packet())
     end
 end
@@ -357,6 +370,10 @@ local function start_replay(record)
         return
     end
     local age = os.time() - record.time
+    if age < 0 then
+        printf('ignored a pick from %s dated %d seconds ahead.', record.leader, -age)
+        return
+    end
     if age > MAX_AGE then
         printf('ignored a pick from %s made %d seconds ago.', record.leader, age)
         return
@@ -394,8 +411,9 @@ local function start_replay(record)
         book = book,
         trigger = put16(put32(record.trigger, ACTION_TARGET, book.id), ACTION_INDEX, book.index),
         -- An active hunt opens a cancel prompt under the book's own menu id.
-        -- The A.M.A.N. line is what tells the book's menu from that one.
-        need_text = cfg.strict and record.confirmed,
+        -- The A.M.A.N. line is what tells the book's menu from that one, so
+        -- strict waits for it here whatever the leader saw.
+        need_text = cfg.strict,
         confirmed = false,
         -- Boxes start a little apart instead of all in one frame.
         at = os.clock() + (me.id % 5) * 0.1,
@@ -444,6 +462,9 @@ local function step_replay(now)
         replay.deadline = now + MENU_TIMEOUT
         send(OUT_ACTION, replay.trigger)
     elseif replay.state == 'wait_menu' then
+        if menu.seq > replay.mark then
+            replay.opened = true
+        end
         if menu.seq > replay.mark and (replay.confirmed or not replay.need_text) then
             if same_menu() then
                 replay.state = 'answer'
@@ -457,6 +478,15 @@ local function step_replay(now)
             end
         end
     elseif replay.state == 'answer' then
+        -- Once the event has been seen open, idle means it closed: by the
+        -- player or the server. The answers left have no menu to go to.
+        local now_status = status()
+        if now_status == STATUS_EVENT then
+            replay.in_event = true
+        elseif replay.in_event and now_status == STATUS_IDLE then
+            abort('the menu closed before the last answer.')
+            return
+        end
         if now < replay.at or not same_menu() then
             return
         end
@@ -545,6 +575,7 @@ function mirror.on_packet_out(e)
         capture = {
             at = os.clock(),
             book = name,
+            book_id = rd32(packet, ACTION_TARGET),
             zone = zone_id(),
             trigger = packet,
             steps = {},
@@ -555,6 +586,14 @@ function mirror.on_packet_out(e)
             printf('talk to the %s (id %d, index %d) %s', name, rd32(packet, ACTION_TARGET), index, to_hex(packet))
         end
     elseif capture ~= nil and #packet >= CHOICE_SIZE then
+        -- An answer to anything but the book, or to this character as some
+        -- menus address it, belongs to another event: one a trade opened, say.
+        local target = rd32(packet, CHOICE_TARGET)
+        local me = self_info()
+        if target ~= capture.book_id and not (me ~= nil and target == me.id) then
+            capture = nil
+            return
+        end
         if #capture.steps >= MAX_STEPS then
             printf('more than %d answers in one visit. Nothing will be mirrored.', MAX_STEPS)
             capture = nil
@@ -672,6 +711,12 @@ local function on_off(value, current)
     return not current
 end
 
+--- Tracker is unloading. A follower mid-pick is backed out of its menu.
+function mirror.unload()
+    capture = nil
+    abort('Tracker unloaded.')
+end
+
 --- 'off', 'leader', or 'follower': what the window's setting shows.
 function mirror.mode()
     if cfg == nil or not cfg.enabled then
@@ -694,7 +739,7 @@ function mirror.set_mode(mode)
         transport.prime()
     end
     capture = nil
-    replay = nil
+    abort('the mirror setting changed.')
     settingslib.save()
     return true
 end
@@ -711,7 +756,7 @@ function mirror.command(args)
     elseif sub == 'on' or sub == 'off' then
         cfg.enabled = sub == 'on'
         capture = nil
-        replay = nil
+        abort('the mirror setting changed.')
         if cfg.enabled then
             transport.prime()
         end
@@ -720,7 +765,7 @@ function mirror.command(args)
     elseif sub == 'leader' or sub == 'follower' then
         cfg.role = sub
         capture = nil
-        replay = nil
+        abort('the mirror setting changed.')
         transport.prime()
         settingslib.save()
         if sub == 'leader' then

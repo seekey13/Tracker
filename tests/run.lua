@@ -2761,6 +2761,83 @@ local function mirror_checks()
     tick(late)
     truthy(printed('ignored a record it could not read'), 'a record that does not parse is reported')
 
+    -- A fresh follower for what can go wrong partway through.
+    local second, second_cfg = fresh('follower')
+    local function open_book(text)
+        who = alt
+        tick(second)
+        tick(second, 1)
+        ents[20].status = 4
+        second.on_packet_in({ id = 0x034, data = menu_packet(600, 61) })
+        if text ~= false then
+            second.on_tome_text()
+        end
+        tick(second)
+    end
+
+    -- The menu closing early ends the replay. Nothing goes to a closed event.
+    lead_pick()
+    local mark = #sent
+    open_book()
+    tick(second, 0.2)
+    eq(#sent, mark + 2, 'the second follower talks and gives the first answer')
+    ents[20].status = 0
+    tick(second, 0.3)
+    tick(second, 1)
+    eq(#sent, mark + 2, 'no answer goes out once the menu has closed')
+    truthy(printed('the menu closed before the last answer'), 'the follower says the menu closed early')
+
+    -- Strict on a follower holds even when the leader sent without the line.
+    leader_cfg.strict = false
+    lead_pick({ text = false })
+    mark = #sent
+    open_book(false)
+    tick(second, 1)
+    eq(#sent, mark + 1, 'strict: a follower waits for its own line whatever the leader saw')
+    tick(second, 6)
+    eq(#sent, mark + 2, 'and backs out when it never comes')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'with the back-out answer')
+    ents[20].status = 0
+
+    -- An answer to another npc ends the recording: a book that never opened,
+    -- then a menu a trade opened.
+    local held = channel_text()
+    who = lead
+    out(leader, 0x01A, talk(500))
+    ents[10].status = 4
+    tick(leader)
+    out(leader, 0x05B, '\91\10\1\2' .. le32(17000700) .. le32(0x12) .. le16(700) .. '\0\0' .. le16(245) .. le16(61))
+    ents[10].status = 0
+    tick(leader)
+    eq(channel_text(), held, 'an answer to another npc is not sent as the book\'s')
+    leader_cfg.strict = true
+
+    -- A record whose packets are not the client's own sizes is not replayed.
+    lead_pick()
+    mark = #sent
+    local good = channel_text()
+    write_file(channel, (good:gsub('\n#END', 'AA\n#END')))
+    who = alt
+    tick(second)
+    tick(second, 1)
+    eq(#sent, mark, 'an answer of the wrong size is never sent')
+    truthy(printed('bad answer packet'), 'and the follower says why')
+    write_file(channel, (good:gsub('|245|', '|nan|', 1)))
+    tick(second)
+    tick(second, 1)
+    eq(#sent, mark, 'a record with a number that is not one is never followed')
+
+    -- Turning the mirror off partway backs the follower out of the book.
+    lead_pick()
+    mark = #sent
+    open_book()
+    eq(#sent, mark + 1, 'the follower is in the book with no answer sent yet')
+    second.set_mode('off')
+    eq(#sent, mark + 2, 'switching the mirror off sends one packet')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out of the book')
+    eq(second_cfg.enabled, false, 'and the mirror is off')
+    ents[20].status = 0
+
     -- Tracker hands its own events to the mirror.
     local mirror_cfg = dailies.settings().mirror
     eq(type(mirror_cfg), 'table', 'the settings carry a mirror table')
