@@ -135,4 +135,17 @@ function items.id(name)
     return id, looked
 end
 
+--- True when name, in any case, is the short or log name of item id.
+function items.named(id, name)
+    name = trim(name)
+    if type(id) ~= 'number' or name == '' then
+        return false
+    end
+    local res = resources()
+    if res == nil then
+        return false
+    end
+    return names_of(res, id)[name:lower()] == true
+end
+
 return items

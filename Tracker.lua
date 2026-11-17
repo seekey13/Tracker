@@ -1,7 +1,7 @@
 --[[
 Tracker
-Goblin dailies, Palalumin quests, the Aether Traveler's week, and AMAN
-training regimes.
+Goblin dailies, Palalumin quests, the Aether Traveler's week, AMAN
+training regimes, and Magian trials.
 Copyright (c) 2026 Seekey
 https://github.com/seekey13/Tracker
 
@@ -19,6 +19,7 @@ local chat = require('chat')
 local settings = require('settings')
 local dailies = require('lib.dailies')
 local regime = require('lib.regime')
+local trials = require('lib.trials')
 local packets = require('lib.packets')
 local parse = require('lib.daily_parse')
 local ui = require('lib.ui')
@@ -41,6 +42,9 @@ local defaults = T{
     enemies = T{},
     target_level_range = nil,
     training_area_zone = nil,
+    -- No trials key: settings merge would hand every older file this same
+    -- table, and one character's trials would reach the next. trials.bind
+    -- gives each character its own.
 }
 
 local DAILY_KEYS = {
@@ -87,6 +91,9 @@ local function unused(saved)
     if type(saved.enemies) == 'table' and #saved.enemies > 0 then
         return false
     end
+    if type(saved.trials) == 'table' and #saved.trials > 0 then
+        return false
+    end
     return true
 end
 
@@ -129,6 +136,7 @@ local function adopt(saved)
     end
     migrate(saved)
     dailies.bind(saved)
+    trials.bind(saved)
     local restored = regime.bind(saved)
     dailies.roll_day()
     if restored then
@@ -194,8 +202,51 @@ local function help()
     printf('  /tracker clear       Clear the AMAN regime')
     printf('  /tracker debug       Toggle death-packet logging')
     printf('  /tracker test <name> Test an enemy name against the regime')
+    printf('  /tracker trial       Print Magian trial progress')
+    printf('  /tracker trial <number> <total>  Set a trial\'s total objectives')
+    printf('  /tracker trial clear [number]    Drop one trial, or every trial')
     printf('Hold Shift to drag. The frame fades until the mouse is over the window. The cog scales it. The x closes it.')
     printf('/at, /goldilox and /dailies still work.')
+end
+
+-- Digits only: tonumber also reads inf, 1e3 and 0x10.
+local function whole(text)
+    if type(text) ~= 'string' or not text:match('^%d+$') then
+        return nil
+    end
+    local n = tonumber(text)
+    if n < 1 then
+        return nil
+    end
+    return n
+end
+
+local function trial_command(args)
+    local what = string.lower(args[3] or '')
+    if what == '' then
+        trials.report(printf)
+    elseif what == 'clear' then
+        if args[4] == nil or args[4] == '' then
+            trials.clear()
+            printf('Trials cleared.')
+            return
+        end
+        local number = whole(args[4])
+        if number and trials.clear(number) > 0 then
+            printf('Trial-%d cleared.', number)
+        else
+            printf('No trial %s is tracked.', tostring(args[4]))
+        end
+    else
+        local number, total = whole(args[3]), whole(args[4])
+        if number == nil or total == nil then
+            printf('Usage: /tracker trial <number> <total>')
+        elseif trials.set_total(number, total) then
+            printf('Trial-%d: %d objectives in all.', number, total)
+        else
+            printf('Trial-%d has more than %d objectives left.', number, total)
+        end
+    end
 end
 
 local function on_command(args)
@@ -232,6 +283,8 @@ local function on_command(args)
         end
     elseif sub == 'dailies' then
         dailies.report()
+    elseif sub == 'trial' or sub == 'trials' then
+        trial_command(args)
     else
         help()
     end
@@ -247,7 +300,9 @@ ashita.events.register('text_in', 'tracker_text_in', function(e)
         return
     end
     dailies.on_text(e)
-    regime.on_text(e.message, plain(e.message))
+    local stripped = plain(e.message)
+    regime.on_text(e.message, stripped)
+    trials.on_text(stripped)
 end)
 
 ashita.events.register('packet_in', 'tracker_packet_in', function(e)
@@ -258,6 +313,7 @@ ashita.events.register('packet_out', 'tracker_packet_out', function(e)
     -- A trade another addon blocked never reaches the npc.
     if e.id == 0x0036 and not e.blocked then
         dailies.on_trade(e.data)
+        trials.on_trade(e.data)
     end
 end)
 
@@ -275,6 +331,7 @@ ashita.events.register('d3d_present', 'tracker_present', function()
     dailies.roll_day()
     ui.render()
     dailies.trade_update()
+    trials.update()
 end)
 
 ashita.events.register('key', 'tracker_key', function(e)
