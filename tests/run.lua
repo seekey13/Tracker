@@ -2671,6 +2671,9 @@ local function mirror_checks()
     eq(#sent, 3, 'nothing follows the pick')
     ents[20].status = 0
     tick(follower)
+    eq(printed('followed Leader.'), false, 'idle right after the pick is not yet followed')
+    eq(update_in(follower).blocked, true, 'the server\'s late replies are still blocked')
+    tick(follower, 1.5)
     truthy(printed('followed Leader.'), 'the follower reports the finished pick')
     tick(follower, 1)
     eq(#sent, 3, 'one record is followed once')
@@ -2686,6 +2689,21 @@ local function mirror_checks()
     eq(adopted.target_level_range, '48~49', 'the level range')
     eq(adopted.training_area_zone, 'Garlaige Citadel', 'the training area')
     truthy(printed('Active Training: 5 Donjon Bats, 3 Fallen Mages in Garlaige Citadel'), 'the follower prints the regime')
+    local function confirmations()
+        local n = 0
+        for _, line in ipairs(lines) do
+            if line:find('Training regime confirmed!', 1, true) then
+                n = n + 1
+            end
+        end
+        return n
+    end
+    local confirmed_before = confirmations()
+    regime.on_text('New training regime registered!')
+    eq(confirmations(), confirmed_before, 'the server\'s line just after a follow prints nothing more')
+    clock = clock + 6
+    regime.on_text('New training regime registered!')
+    eq(confirmations(), confirmed_before + 1, 'the server\'s line is taken again 5 seconds after')
     eq(update_in(follower).blocked, false, 'with nothing being followed, page updates pass')
     eq(menu_in(follower, 600, 61).blocked, false, 'the player\'s own visit to the book is left alone')
 
@@ -2730,7 +2748,7 @@ local function mirror_checks()
     tick(follower, 0.3)
     eq(#sent, 10, 'strict off: the talk and both answers go out')
     eq(read_u32(sent[10].data, 9), 0x80000012, 'and the last is the pick')
-    tick(follower)
+    tick(follower, 1.5)
     follower_cfg.strict = true
 
     -- Food from the book carries no targets, and the follower's page stays.
@@ -2744,7 +2762,7 @@ local function mirror_checks()
     tick(follower, 0.2)
     tick(follower, 0.3)
     eq(read_u32(sent[#sent].data, 9), 196, 'the follower buys the same food')
-    tick(follower)
+    tick(follower, 1.5)
     eq(regime.view().enemies[1].name, 'Donjon Bats', 'a purchase leaves the follower\'s page alone')
 
     -- A pick whose page text the leader never read carries no targets.
@@ -2979,9 +2997,22 @@ local function mirror_checks()
     tick(follower)
     tick(follower, 0.2)
     tick(follower, 0.3)
-    tick(follower)
+    tick(follower, 1.5)
     eq(regime.view().is_active, false, 'a page pick without targets clears the old regime')
     truthy(printed('targets did not come with the pick'), 'the follower says so')
+
+    -- With nothing being followed, stop backs out of the last book it blocked.
+    local reset_at = #sent
+    follower.command({ '/tracker', 'mirror', 'stop' })
+    eq(#sent, reset_at + 1, 'stop with nothing being followed sends one packet')
+    eq(read_u32(sent[#sent].data, 5), 17000600, 'to the book the follower last followed at')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out')
+    eq(read_u16(sent[#sent].data, 19), 61, 'of its menu')
+    truthy(printed('backed out of the last book menu (61)'), 'stop says what it did')
+    follower.on_packet_in({ id = 0x00B, data = '' })
+    follower.command({ '/tracker', 'mirror', 'stop' })
+    eq(#sent, reset_at + 1, 'after zoning there is no book to back out of')
+    truthy(printed('nothing to stop'), 'and stop says so')
 
     -- Tracker hands its own events to the mirror.
     local mirror_cfg = dailies.settings().mirror

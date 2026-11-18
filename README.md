@@ -63,7 +63,7 @@ A leader never follows, and leader is the role a character starts with. A follow
 - `/tracker mirror leader` and `follower` set the role
 - `/tracker mirror only <name>` follows that leader alone. `any` follows every leader
 - `/tracker mirror strict on` or `off`. On by default
-- `/tracker mirror stop` stops following the current pick
+- `/tracker mirror stop` stops following the current pick. With nothing being followed, it backs out of the last book this character followed at, in case it was left standing in one
 - `/tracker mirror dump` toggles packet logging
 
 Only a talk to a Field Manual or Grounds Tome is recorded. Trades, shops, and other npcs are never sent. Backing out of the book sends nothing.

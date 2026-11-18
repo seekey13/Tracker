@@ -40,6 +40,9 @@ local debug_on = false
 -- Pages read since load. The mirror compares it before and after a visit to
 -- tell whether this visit showed a page.
 local parses = 0
+-- Until this os.clock(), the server's "registered" line is not taken. A
+-- mirror follower sets it while it takes the leader's targets.
+local hold_until = 0
 
 local function printf(fmt, ...)
     print(chat.header(addon.name) .. chat.message(fmt:format(...)))
@@ -135,17 +138,32 @@ local function prune(now)
     end
 end
 
+-- The server's own "registered" line. A mirror follower holds it, since the
+-- leader's targets print their own confirmation and this one would print the
+-- page that was there before.
+local function confirm_from_text()
+    if os.clock() < hold_until then
+        return
+    end
+    confirm()
+end
+
 local HANDLERS = {
     { pattern = MESSAGES.START_PROMPT, needs_active = false, fn = function()
         state.is_active = true
     end },
     { pattern = MESSAGES.TRAINING_START, needs_active = true, fn = start_parsing },
-    { pattern = MESSAGES.REGIME_CONFIRMED, needs_active = true, fn = confirm },
+    { pattern = MESSAGES.REGIME_CONFIRMED, needs_active = true, fn = confirm_from_text },
     { pattern = MESSAGES.REGIME_CANCELED, needs_active = true, fn = wipe },
 }
 
 function regime.parses()
     return parses
+end
+
+--- Ignore the server's "registered" line for the next `seconds`.
+function regime.hold_confirm(seconds)
+    hold_until = os.clock() + (tonumber(seconds) or 0)
 end
 
 --- Take a page another box picked. A mirror follower never sees the page

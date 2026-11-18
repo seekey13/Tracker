@@ -81,6 +81,12 @@ local MENU_TIMEOUT = 5 -- for the book to open on a follower
 local FIRST_DELAY = 0.15 -- between the menu arriving and the first answer
 local STEP_DELAY = 0.3 -- between one answer and the next
 local FINISH_TIMEOUT = 8 -- for the event to close after the last answer
+-- A follower's client never enters the event, so its status can read idle
+-- throughout. The follow keeps blocking this long after the pick regardless,
+-- for the server's late replies.
+local FINISH_HOLD = 1.5
+-- The server's "registered" line is held this long after a follow ends.
+local CONFIRM_HOLD = 5
 local CAPTURE_TIMEOUT = 120
 local MAX_STEPS = 40
 local MAX_TARGETS = 8
@@ -99,6 +105,9 @@ local capture = nil
 local replay = nil
 -- The last menu packet this client received.
 local menu = { id = 0, npc_id = 0, npc_index = 0 }
+-- The last book menu a follow blocked, for /tracker mirror stop to back out
+-- of when nothing is being followed. Cleared on zoning.
+local last_book = nil
 
 local function printf(fmt, ...)
     print(chat.header(addon.name) .. chat.message(('Mirror: ' .. fmt):format(...)))
@@ -456,14 +465,14 @@ end
 
 -- "Back out of this menu", as the client sends it. Ends the event without
 -- picking anything.
-local function back_out_packet()
+local function back_out_packet(m)
     return string.rep('\0', 4)
-        .. put32('\0\0\0\0', 0, menu.npc_id)
+        .. put32('\0\0\0\0', 0, m.npc_id)
         .. put32('\0\0\0\0', 0, BACK_OUT)
-        .. put16('\0\0', 0, menu.npc_index)
+        .. put16('\0\0', 0, m.npc_index)
         .. '\0\0'
         .. put16('\0\0', 0, zone_id())
-        .. put16('\0\0', 0, menu.id)
+        .. put16('\0\0', 0, m.id)
 end
 
 -- Stop a replay. The client never saw the book, so an event still open on
@@ -478,7 +487,7 @@ local function abort(fmt, ...)
     printf('stopped at answer %d of %d: ' .. fmt, replay.index, #replay.steps, ...)
     replay = nil
     if open and menu.npc_id ~= 0 then
-        send(OUT_CHOICE, back_out_packet())
+        send(OUT_CHOICE, back_out_packet(menu))
     end
 end
 
@@ -616,12 +625,13 @@ local function step_replay(now)
         else
             replay.state = 'finish'
             replay.mark = replay.menus
+            replay.hold_until = now + FINISH_HOLD
             replay.deadline = now + FINISH_TIMEOUT
         end
     elseif replay.state == 'finish' then
         if replay.menus > replay.mark then
             abort('another menu opened after the last answer %s gave.', replay.leader)
-        elseif status() == STATUS_IDLE then
+        elseif now >= replay.hold_until and status() == STATUS_IDLE then
             local page = replay.record.page
             local was_page = is_page_pick(replay.steps[#replay.steps])
             local leader = replay.leader
@@ -773,6 +783,7 @@ function mirror.on_packet_in(e)
             replay.menus = replay.menus + 1
             replay.open = true
             replay.params = params
+            last_book = { id = menu.id, npc_id = menu.npc_id, npc_index = menu.npc_index }
         end
     elseif e.id == IN_EVENT_UPDATE then
         if replay ~= nil and replay.state ~= 'pending' then
@@ -784,6 +795,7 @@ function mirror.on_packet_in(e)
         end
         replay = nil
         capture = nil
+        last_book = nil
         menu.id, menu.npc_id, menu.npc_index = 0, 0, 0
     end
 end
@@ -829,6 +841,7 @@ function mirror.tick()
         end
     end
     if replay ~= nil then
+        regime.hold_confirm(CONFIRM_HOLD)
         step_replay(now)
     end
 end
@@ -853,7 +866,7 @@ local function help()
     printf('  /tracker mirror follower      Follow the leader\'s picks. Never send')
     printf('  /tracker mirror only <name>   Follow only <name>. "any" follows every leader')
     printf('  /tracker mirror strict on|off Check it is the book\'s own menu on both boxes. On by default')
-    printf('  /tracker mirror stop          Stop following the current pick')
+    printf('  /tracker mirror stop          Stop following, or back out of the last book if stuck')
     printf('  /tracker mirror dump          Toggle packet logging')
 end
 
@@ -933,10 +946,15 @@ function mirror.command(args)
         settingslib.save()
         printf('strict %s.', cfg.strict and 'on' or 'off')
     elseif sub == 'stop' then
-        if replay == nil then
-            printf('nothing to stop.')
-        else
+        if replay ~= nil then
             abort('stopped by command.')
+        elseif last_book ~= nil then
+            -- A follower left in a book event its screen never showed. A
+            -- back-out of a closed event does nothing.
+            send(OUT_CHOICE, back_out_packet(last_book))
+            printf('backed out of the last book menu (%d).', last_book.id)
+        else
+            printf('nothing to stop.')
         end
     elseif sub == 'dump' then
         dump = not dump
