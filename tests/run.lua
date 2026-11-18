@@ -1318,6 +1318,30 @@ eq(count_rect(bg_rect(255)), opaque_grounds + 1, 'the scale row stays opaque whi
 eq(slider_id, '##tracker.scale', 'the scale slider shows once the cog opens it')
 eq(slider_range and slider_range[1], 0.5, 'the scale slider starts at 0.5x')
 eq(slider_range and slider_range[2], 2, 'the scale slider ends at 2x')
+-- The mirror's three settings sit under the scale row. A click sets and saves.
+local mirror_cfg = cfg.mirror
+truthy(has_text('Mirror'), 'the cog shows the mirror row')
+truthy(button_at('##mirror.off') and button_at('##mirror.leader') and button_at('##mirror.follower'),
+    'the mirror row offers off, leader, and follower')
+eq(mirror_cfg.enabled, false, 'the mirror row starts on off')
+local mirror_saves = saves
+click_id = '##mirror.follower'
+render()
+eq(mirror_cfg.enabled, true, 'clicking Follower turns the mirror on')
+eq(mirror_cfg.role, 'follower', 'and sets the role')
+eq(saves, mirror_saves + 1, 'and saves it')
+click_id = '##mirror.follower'
+render()
+eq(saves, mirror_saves + 1, 'clicking the lit setting saves nothing')
+click_id = '##mirror.leader'
+render()
+eq(mirror_cfg.role, 'leader', 'clicking Leader sets the role')
+eq(mirror_cfg.enabled, true, 'and leaves the mirror on')
+click_id = '##mirror.off'
+render()
+eq(mirror_cfg.enabled, false, 'clicking Off turns the mirror off')
+eq(mirror_cfg.role, 'leader', 'and keeps the role')
+
 local saves_before = saves
 world.slider_held = true
 slider_mode = 2
@@ -2408,6 +2432,613 @@ eq(dailies.item_count(testimony_name), 0, 'the handed-over testimony counts none
 actors[1830] = nil
 world.zone = 34
 player.x, player.y = SPOT_X, SPOT_Y
+
+-- The mirror. Two copies of the module stand in for two clients: one leads,
+-- one follows, and they share a channel file. `who` is the client acting.
+local function mirror_checks()
+    local temp = (os.getenv('TEMP') or '.') .. '\\tracker-mirror-test'
+    os.execute('rmdir /s /q "' .. temp .. '" >nul 2>&1')
+    mkdir(temp)
+    mkdir(temp .. '\\config')
+    mkdir(temp .. '\\config\\addons')
+    mkdir(temp .. '\\config\\addons\\Tracker')
+    local old_install = world.install
+    world.install = temp
+    world.zone = 245
+
+    local lead = { id = 1001, index = 10, name = 'Leader', level = 75 }
+    local alt = { id = 2002, index = 20, name = 'Alt', level = 75 }
+    local who = lead
+    -- The leader stands at one Field Manual and the alt at another.
+    local ents = {
+        [10] = { name = 'Leader', id = 1001, flags = 0x200, dist = 0, status = 0 },
+        [20] = { name = 'Alt', id = 2002, flags = 0x200, dist = 0, status = 0 },
+        [500] = { name = 'Field Manual', id = 17000500, flags = 0x200, dist = 400 },
+        [600] = { name = 'Field Manual', id = 17000600, flags = 0x200, dist = 4 },
+        [700] = { name = 'Shopkeep', id = 17000700, flags = 0x200, dist = 1 },
+    }
+    AshitaCore.GetMemoryManager = function()
+        return {
+            GetPlayer = function()
+                return { GetMainJobLevel = function() return who.level end }
+            end,
+            GetParty = function()
+                return {
+                    GetMemberZone = function() return world.zone end,
+                    GetMemberTargetIndex = function() return who.index end,
+                    GetMemberServerId = function() return who.id end,
+                    GetMemberName = function() return who.name end,
+                }
+            end,
+            GetEntity = function()
+                return {
+                    GetName = function(_, i) return ents[i] and ents[i].name or '' end,
+                    GetServerId = function(_, i) return ents[i] and ents[i].id or 0 end,
+                    GetRenderFlags0 = function(_, i) return ents[i] and ents[i].flags or 0 end,
+                    GetDistance = function(_, i) return ents[i] and ents[i].dist or 10000 end,
+                    GetStatus = function(_, i) return ents[i] and ents[i].status or 0 end,
+                }
+            end,
+        }
+    end
+    local sent = {}
+    AshitaCore.GetPacketManager = function()
+        return {
+            AddOutgoingPacket = function(_, id, data)
+                sent[#sent + 1] = { id = id, data = data }
+            end,
+        }
+    end
+
+    local function le16(n)
+        return string.char(n % 256, math.floor(n / 256) % 256)
+    end
+    local function le32(n)
+        return le16(n % 65536) .. le16(math.floor(n / 65536))
+    end
+    local function talk(index, category)
+        return '\26\14\1\2' .. le32(ents[index].id) .. le16(index) .. le16(category or 0) .. string.rep('\7', 16)
+    end
+    local function choice(option, update, menu_id)
+        return '\91\10\1\2' .. le32(17000500) .. le32(option) .. le16(500)
+            .. string.char(update and 1 or 0) .. '\0' .. le16(245) .. le16(menu_id or 61)
+    end
+    -- The book opens with 0, a page mask, the cipher, a key item, then the
+    -- character's own tabs and regime. A hunt opens 0, 0, 3 instead.
+    local LEADER_PARAMS = { 0, 0x600, 0, 1, 0, 0, 900, 12 }
+    local ALT_PARAMS = { 0, 0x600, 0, 0, 0, 0, 40, 0 }
+    local HUNT_PARAMS = { 0, 0, 3, 1, 0, 0, 40, 5 }
+    local function menu_packet(index, menu_id, params)
+        local blob = ''
+        for i = 1, 8 do
+            blob = blob .. le32((params or ALT_PARAMS)[i])
+        end
+        return '\52\26\0\0' .. le32(ents[index].id) .. blob .. le16(index) .. le16(245)
+            .. le16(menu_id) .. string.rep('\0', 6)
+    end
+    -- One incoming menu packet. The event comes back so blocking can be read.
+    local function menu_in(instance, index, menu_id, params)
+        local e = { id = 0x034, data = menu_packet(index, menu_id, params), blocked = false }
+        instance.on_packet_in(e)
+        return e
+    end
+    local function update_in(instance)
+        local e = { id = 0x05C, data = string.rep('\0', 0x24), blocked = false }
+        instance.on_packet_in(e)
+        return e
+    end
+    local regime = require('lib.regime')
+    local function fresh(role)
+        package.loaded['lib.mirror'] = nil
+        package.loaded['lib.mirror_transport'] = nil
+        local instance = require('lib.mirror')
+        local saved = {}
+        instance.bind(saved)
+        saved.mirror.enabled = true
+        saved.mirror.role = role
+        return instance, saved.mirror
+    end
+    local function tick(instance, seconds)
+        clock = clock + (seconds or 0.1)
+        instance.tick()
+    end
+    local function out(instance, id, data, injected)
+        instance.on_packet_out({ id = id, data = data, size = #data, injected = injected or false })
+    end
+
+    local probe, probe_cfg = fresh('leader')
+    probe_cfg.enabled = nil
+    local blank = {}
+    probe.bind(blank)
+    eq(blank.mirror.enabled, false, 'the mirror is off until turned on')
+    eq(blank.mirror.role, 'leader', 'the default role never follows')
+    eq(blank.mirror.strict, true, 'strict is on by default')
+
+    local follower, follower_cfg = fresh('follower')
+    local leader, leader_cfg = fresh('leader')
+    local channel = temp .. '\\config\\addons\\Tracker\\mirror_channel.txt'
+
+    -- The leader looks at page 1, reads it, then picks it with the repeat box
+    -- ticked. opts.option buys from the book instead.
+    local leader_menu = nil
+    local function lead_pick(opts)
+        opts = opts or {}
+        who = lead
+        out(leader, 0x01A, talk(opts.npc or 500, opts.category))
+        leader_menu = menu_in(leader, opts.npc or 500, 61, LEADER_PARAMS)
+        if opts.text ~= false then
+            leader.on_tome_text()
+            regime.on_text("This Field Manual has been placed here by the Adventurers' Mutual Aid Network (A.M.A.N.).")
+        end
+        ents[10].status = 4
+        tick(leader)
+        if opts.back_out then
+            out(leader, 0x05B, choice(0x40000000, false))
+        elseif opts.option then
+            out(leader, 0x05B, choice(opts.option, true))
+            out(leader, 0x05B, choice(opts.option, false))
+        else
+            out(leader, 0x05B, choice(0x12, true))
+            if opts.page_text ~= false then
+                regime.on_text('The information on this page instructs you to defeat the following:')
+                regime.on_text('5 Donjon Bats. 3 Fallen Mages.')
+                regime.on_text('Target level range: 48~49.')
+                regime.on_text('Training area: Garlaige Citadel.')
+            end
+            out(leader, 0x05B, choice(0x80000012, false))
+        end
+        ents[10].status = 0
+        tick(leader)
+    end
+    local function channel_text()
+        local handle = io.open(channel, 'rb')
+        if handle == nil then
+            return nil
+        end
+        local body = handle:read('*a')
+        handle:close()
+        return body
+    end
+
+    lead_pick({ npc = 700 })
+    eq(channel_text(), nil, 'a talk to another npc is not sent')
+    lead_pick({ category = 2 })
+    eq(channel_text(), nil, 'an action that is not a talk is not sent')
+    lead_pick({ back_out = true })
+    eq(channel_text(), nil, 'backing out of the book is not sent')
+    lead_pick({ text = false })
+    eq(channel_text(), nil, 'strict: a book that never printed its line is not sent')
+    truthy(printed('never printed its A.M.A.N. line'), 'strict says why nothing was sent')
+    who = lead
+    out(leader, 0x01A, talk(500), true)
+    ents[10].status = 4
+    tick(leader)
+    out(leader, 0x05B, choice(0x12, false), true)
+    ents[10].status = 0
+    tick(leader)
+    eq(channel_text(), nil, 'injected packets are not recorded')
+
+    lead_pick()
+    truthy(printed('sent 2 answers from the Field Manual with its targets'), 'the pick is sent once the menu closes')
+    eq(leader_menu.blocked, false, 'the leader\'s own menu is never blocked')
+    local body = channel_text() or ''
+    truthy(body:find('TRACKER-MIRROR-2|', 1, true) == 1, 'the record names its protocol')
+    truthy(body:find('#END', 1, true), 'the record ends with its sentinel')
+    eq(#sent, 0, 'the leader injects nothing')
+    tick(leader)
+    eq(#sent, 0, 'the leader never follows its own record')
+
+    -- The alt talks to its own manual. Its client never sees that menu.
+    regime.clear()
+    who = alt
+    tick(follower)
+    truthy(printed('following Leader: 2 answers'), 'the follower takes the record')
+    tick(follower, 1)
+    eq(#sent, 1, 'the follower talks to a book')
+    eq(sent[1].id, 0x01A, 'the talk is a 0x01A')
+    eq(#sent[1].data, 28, 'the talk keeps its size')
+    eq(read_u32(sent[1].data, 1), 0, 'the header is left for Ashita')
+    eq(read_u32(sent[1].data, 5), 17000600, 'the talk goes to the manual the alt stands at')
+    eq(read_u16(sent[1].data, 9), 600, 'the talk carries that manual\'s index')
+    eq(sent[1].data[13], 7, 'the rest of the talk is the leader\'s')
+    tick(follower)
+    eq(#sent, 1, 'nothing is answered before the menu opens')
+    eq(menu_in(follower, 700, 61).blocked, false, 'another npc\'s menu reaches the client')
+    tick(follower, 1)
+    eq(#sent, 1, 'another npc\'s menu is not the book\'s')
+    ents[20].status = 4
+    eq(menu_in(follower, 600, 61).blocked, true, 'the book\'s menu never reaches the alt\'s client')
+    tick(follower)
+    eq(#sent, 1, 'the first answer waits a moment after the menu')
+    tick(follower, 0.2)
+    eq(#sent, 2, 'the first answer goes out')
+    eq(sent[2].id, 0x05B, 'an answer is a 0x05B')
+    eq(#sent[2].data, 20, 'the answer keeps its size')
+    eq(read_u32(sent[2].data, 5), 17000600, 'the answer goes to the alt\'s manual')
+    eq(read_u32(sent[2].data, 9), 0x12, 'page 1 is option 0x12')
+    eq(read_u16(sent[2].data, 13), 600, 'the answer carries the alt\'s manual index')
+    eq(sent[2].data[15], 1, 'looking at a page stays an update')
+    eq(read_u16(sent[2].data, 19), 61, 'the answer names the alt\'s menu')
+    eq(update_in(follower).blocked, true, 'the page the server sends back never reaches the alt\'s client')
+    tick(follower, 0.1)
+    eq(#sent, 2, 'the next answer waits its turn')
+    -- No menu packet comes between answers; the second goes out on time alone.
+    tick(follower, 0.3)
+    eq(#sent, 3, 'the pick goes out with no new menu packet')
+    eq(read_u32(sent[3].data, 9), 0x80000012, 'the repeat box carries over')
+    eq(sent[3].data[15], 0, 'the pick ends the event')
+    tick(follower)
+    eq(#sent, 3, 'nothing follows the pick')
+    ents[20].status = 0
+    tick(follower)
+    eq(printed('followed Leader.'), false, 'idle right after the pick is not yet followed')
+    eq(update_in(follower).blocked, true, 'the server\'s late replies are still blocked')
+    tick(follower, 1.5)
+    truthy(printed('followed Leader.'), 'the follower reports the finished pick')
+    tick(follower, 1)
+    eq(#sent, 3, 'one record is followed once')
+
+    -- The alt never saw the page, so the leader's targets come with it.
+    local adopted = regime.view()
+    eq(adopted.is_active, true, 'the follower\'s regime is active')
+    eq(#adopted.enemies, 2, 'the follower takes both targets')
+    eq(adopted.enemies[1].name, 'Donjon Bats', 'the first target')
+    eq(adopted.enemies[1].total, 5, 'its count')
+    eq(adopted.enemies[1].killed, 0, 'none killed yet')
+    eq(adopted.enemies[2].name, 'Fallen Mages', 'the second target')
+    eq(adopted.target_level_range, '48~49', 'the level range')
+    eq(adopted.training_area_zone, 'Garlaige Citadel', 'the training area')
+    truthy(printed('Active Training: 5 Donjon Bats, 3 Fallen Mages in Garlaige Citadel'), 'the follower prints the regime')
+    local function confirmations()
+        local n = 0
+        for _, line in ipairs(lines) do
+            if line:find('Training regime confirmed!', 1, true) then
+                n = n + 1
+            end
+        end
+        return n
+    end
+    local confirmed_before = confirmations()
+    regime.on_text('New training regime registered!')
+    eq(confirmations(), confirmed_before, 'the server\'s line just after a follow prints nothing more')
+    clock = clock + 6
+    regime.on_text('New training regime registered!')
+    eq(confirmations(), confirmed_before + 1, 'the server\'s line is taken again 5 seconds after')
+    eq(update_in(follower).blocked, false, 'with nothing being followed, page updates pass')
+    eq(menu_in(follower, 600, 61).blocked, false, 'the player\'s own visit to the book is left alone')
+
+    -- A different menu id is not answered, and the alt is backed out of it.
+    -- The alt's client never entered the event, so its status reads idle.
+    lead_pick()
+    who = alt
+    tick(follower)
+    tick(follower, 1)
+    eq(#sent, 4, 'the next pick opens the book again')
+    menu_in(follower, 600, 99)
+    tick(follower)
+    eq(#sent, 5, 'a different menu sends one packet')
+    eq(read_u32(sent[5].data, 9), 0x40000000, 'and that packet backs out')
+    eq(read_u16(sent[5].data, 19), 99, 'of the menu the alt is in')
+    eq(sent[5].data[15], 0, 'backing out ends the event')
+    truthy(printed('this menu is 99 and Leader answered menu 61'), 'the follower says the menus differ')
+    tick(follower, 1)
+    eq(#sent, 5, 'a stopped replay sends nothing more')
+
+    -- An active hunt opens a cancel prompt under the same menu id: 0, 0, 3
+    -- where the book sends 0, its page mask, its cipher. It is backed out of.
+    lead_pick()
+    who = alt
+    tick(follower)
+    tick(follower, 1)
+    menu_in(follower, 600, 61, HUNT_PARAMS)
+    tick(follower)
+    eq(#sent, 7, 'a hunt\'s prompt gets the talk and one more packet')
+    eq(read_u32(sent[7].data, 9), 0x40000000, 'which backs out')
+    truthy(printed('A hunt in progress opens one'), 'the follower says why')
+
+    -- Strict off answers whatever opens.
+    follower_cfg.strict = false
+    lead_pick()
+    who = alt
+    tick(follower)
+    tick(follower, 1)
+    menu_in(follower, 600, 61, HUNT_PARAMS)
+    tick(follower)
+    tick(follower, 0.2)
+    tick(follower, 0.3)
+    eq(#sent, 10, 'strict off: the talk and both answers go out')
+    eq(read_u32(sent[10].data, 9), 0x80000012, 'and the last is the pick')
+    tick(follower, 1.5)
+    follower_cfg.strict = true
+
+    -- Food from the book carries no targets, and the follower's page stays.
+    lead_pick({ option = 196 })
+    truthy(printed('sent 2 answers from the Field Manual.'), 'a purchase is sent without targets')
+    who = alt
+    tick(follower)
+    tick(follower, 1)
+    menu_in(follower, 600, 61)
+    tick(follower)
+    tick(follower, 0.2)
+    tick(follower, 0.3)
+    eq(read_u32(sent[#sent].data, 9), 196, 'the follower buys the same food')
+    tick(follower, 1.5)
+    eq(regime.view().enemies[1].name, 'Donjon Bats', 'a purchase leaves the follower\'s page alone')
+
+    -- A pick whose page text the leader never read carries no targets.
+    lead_pick({ page_text = false })
+    truthy((channel_text() or ''):find('||1A0E0102', 1, true), 'the record\'s targets field is empty')
+
+    local before = #sent
+    lead_pick()
+    who = alt
+    ents[600].dist = 37
+    tick(follower)
+    tick(follower, 1)
+    eq(#sent, before, 'no book within 6 yalms sends nothing')
+    truthy(printed('no Field Manual within 6 yalms'), 'the follower says the book is out of reach')
+    ents[600].dist = 4
+
+    lead_pick()
+    who = alt
+    ents[20].status = 4
+    tick(follower)
+    tick(follower, 1)
+    eq(#sent, before, 'a follower already in a menu sends nothing')
+    truthy(printed('busy (status 4)'), 'the follower says it is busy')
+    ents[20].status = 0
+
+    lead_pick()
+    who = alt
+    world.zone = 100
+    tick(follower)
+    tick(follower, 1)
+    eq(#sent, before, 'a pick in another zone sends nothing')
+    world.zone = 245
+
+    follower_cfg.only = 'Somebody'
+    lead_pick()
+    who = alt
+    tick(follower)
+    tick(follower, 1)
+    eq(#sent, before, 'a pick from a leader not followed sends nothing')
+    follower_cfg.only = 'leader'
+    lead_pick()
+    who = alt
+    tick(follower)
+    tick(follower, 1)
+    eq(#sent, before + 1, 'a pick from the leader named is followed')
+    command({ '/tracker', 'mirror' })
+    follower.command({ '/tracker', 'mirror', 'stop' })
+    truthy(printed('stopped by command'), 'stop ends the replay')
+    tick(follower, 6)
+    eq(#sent, before + 1, 'a stopped replay never answers')
+    follower_cfg.only = ''
+
+    -- A different level still follows: the page is the same one.
+    alt.level = 40
+    lead_pick()
+    who = alt
+    tick(follower)
+    truthy(printed('Leader is level 75 and this character is level 40'), 'a level gap is pointed out')
+    tick(follower, 1)
+    eq(#sent, before + 2, 'and the pick is still followed')
+    follower.on_packet_in({ id = 0x00B, data = '' })
+    truthy(printed('zoned while following Leader'), 'zoning stops the replay')
+    alt.level = 75
+
+    -- An old record is left alone.
+    local real_time = os.time
+    lead_pick()
+    who = alt
+    os.time = function() return real_time() + 60 end
+    tick(follower)
+    tick(follower, 1)
+    os.time = real_time
+    eq(#sent, before + 2, 'a record older than 20 seconds is ignored')
+
+    -- A second leader reads nothing off the channel.
+    lead_pick()
+    local other = fresh('leader')
+    who = alt
+    tick(other)
+    tick(other, 1)
+    eq(#sent, before + 2, 'a leader never follows')
+
+    -- A follower that starts after a pick does not act on it.
+    local late = fresh('follower')
+    tick(late)
+    tick(late, 1)
+    eq(#sent, before + 2, 'a record written before the follower started is ignored')
+
+    -- A half-written file is skipped until it is whole.
+    -- The channel is read 4 times a second.
+    write_file(channel, 'TRACKER-MIRROR-2|1|2|Leader|245')
+    tick(late, 0.3)
+    eq(#sent, before + 2, 'a record with no sentinel is not read')
+    write_file(channel, 'TRACKER-MIRROR-2|junk\n#END\n')
+    tick(late, 0.3)
+    truthy(printed('ignored a record it could not read'), 'a record that does not parse is reported')
+
+    -- A record is read strictly: only the client's own packet shapes go out.
+    lead_pick()
+    local good = (channel_text() or ''):match('^TRACKER%-MIRROR%-2|(.-)\n')
+    local function fields()
+        local out = {}
+        for part in (good .. '|'):gmatch('(.-)|') do
+            out[#out + 1] = part
+        end
+        return out
+    end
+    local function offer_record(parts, why)
+        write_file(channel, 'TRACKER-MIRROR-2|' .. table.concat(parts, '|') .. '\n#END\n')
+        who = alt
+        local n = #sent
+        tick(late, 0.3)
+        tick(late, 1)
+        eq(#sent, n, why .. ': nothing is sent')
+    end
+    local bad = fields()
+    bad[1] = bad[1] .. '0'
+    bad[2] = 'nan'
+    offer_record(bad, 'a time of nan')
+    truthy(printed('(a number is missing)'), 'a time of nan is refused')
+    bad = fields()
+    bad[1] = bad[1] .. '1'
+    bad[9] = 'ZZ'
+    offer_record(bad, 'menu parameters that are not hex')
+    truthy(printed('(bad menu parameters)'), 'menu parameters that are not hex are refused')
+    bad = fields()
+    bad[1] = bad[1] .. '2'
+    bad[11] = bad[11]:sub(1, 20) .. '0200' .. bad[11]:sub(25)
+    offer_record(bad, 'a talk that is not a talk')
+    truthy(printed('(bad talk packet)'), 'a 0x01A that is not a talk is refused')
+    bad = fields()
+    bad[1] = bad[1] .. '3'
+    bad[12] = bad[12] .. '0000'
+    offer_record(bad, 'an answer of 22 bytes')
+    truthy(printed('(bad answer packet)'), 'an answer longer than the client sends is refused')
+    bad = fields()
+    bad[1] = bad[1] .. '4'
+    bad[#bad] = bad[#bad]:sub(1, 28) .. '01' .. bad[#bad]:sub(31)
+    offer_record(bad, 'a last answer that is a page view')
+    truthy(printed('(the last answer leaves the menu open)'), 'a record ending on a page view is refused')
+    bad = fields()
+    bad[1] = bad[1] .. '5'
+    bad[2] = tostring(os.time() + 60)
+    offer_record(bad, 'a time ahead of the clock')
+    truthy(printed('dated ahead of the clock'), 'a record dated ahead of the clock is refused')
+
+    -- The leader sends nothing when its visit closed on a page view.
+    local kept = channel_text()
+    who = lead
+    out(leader, 0x01A, talk(500))
+    menu_in(leader, 500, 61, LEADER_PARAMS)
+    leader.on_tome_text()
+    ents[10].status = 4
+    tick(leader)
+    out(leader, 0x05B, choice(0x12, true))
+    ents[10].status = 0
+    tick(leader)
+    eq(channel_text(), kept, 'a visit that closed on a page view is not sent')
+    truthy(printed('closed on a page view, not a pick'), 'the leader says why')
+
+    -- An answer to another npc while the book's recording is open drops it.
+    out(leader, 0x01A, talk(500))
+    menu_in(leader, 500, 61, LEADER_PARAMS)
+    leader.on_tome_text()
+    ents[10].status = 4
+    tick(leader)
+    out(leader, 0x05B, '\91\10\1\2' .. le32(17000700) .. le32(0x12) .. le16(700) .. '\0\0' .. le16(245) .. le16(61))
+    out(leader, 0x05B, choice(0x80000012, false))
+    ents[10].status = 0
+    tick(leader)
+    eq(channel_text(), kept, 'an answer to another npc is never sent as the book\'s')
+
+    -- A follow stopped any other way still backs out of the book.
+    local function follow_to_first_answer()
+        lead_pick()
+        who = alt
+        tick(follower, 1)
+        tick(follower, 1)
+        menu_in(follower, 600, 61)
+        tick(follower)
+        tick(follower, 0.2)
+    end
+    local mid = #sent
+    follow_to_first_answer()
+    eq(#sent, mid + 2, 'the talk and the page view went out')
+    follower.set_mode('off')
+    eq(#sent, mid + 3, 'turning the mirror off partway sends one more packet')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out')
+    truthy(printed('the mirror setting changed'), 'the follower says why it stopped')
+    follower.set_mode('follower')
+
+    mid = #sent
+    follow_to_first_answer()
+    follower.command({ '/tracker', 'mirror', 'leader' })
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'changing the role partway backs out')
+    eq(#sent, mid + 3, 'with one packet')
+    follower.command({ '/tracker', 'mirror', 'follower' })
+
+    mid = #sent
+    follow_to_first_answer()
+    follower.unload()
+    eq(#sent, mid + 3, 'unloading partway sends one more packet')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out')
+
+    -- In the final wait, a stop or a timeout backs out too.
+    mid = #sent
+    follow_to_first_answer()
+    ents[20].status = 4
+    tick(follower, 0.3)
+    eq(read_u32(sent[#sent].data, 9), 0x80000012, 'the pick went out')
+    follower.command({ '/tracker', 'mirror', 'stop' })
+    eq(#sent, mid + 4, 'a stop in the final wait sends one more packet')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out')
+    ents[20].status = 0
+    mid = #sent
+    follow_to_first_answer()
+    ents[20].status = 4
+    tick(follower, 0.3)
+    tick(follower, 9)
+    truthy(printed('the menu never closed'), 'the final wait times out')
+    eq(#sent, mid + 4, 'and the timeout sends one more packet')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out')
+    ents[20].status = 0
+
+    -- A page pick that came without targets clears the old ones.
+    eq(regime.view().is_active, true, 'the follower still has its old regime')
+    lead_pick({ page_text = false })
+    who = alt
+    tick(follower, 1)
+    tick(follower, 1)
+    menu_in(follower, 600, 61)
+    tick(follower)
+    tick(follower, 0.2)
+    tick(follower, 0.3)
+    tick(follower, 1.5)
+    eq(regime.view().is_active, false, 'a page pick without targets clears the old regime')
+    truthy(printed('targets did not come with the pick'), 'the follower says so')
+
+    -- With nothing being followed, stop backs out of the last book it blocked.
+    local reset_at = #sent
+    follower.command({ '/tracker', 'mirror', 'stop' })
+    eq(#sent, reset_at + 1, 'stop with nothing being followed sends one packet')
+    eq(read_u32(sent[#sent].data, 5), 17000600, 'to the book the follower last followed at')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out')
+    eq(read_u16(sent[#sent].data, 19), 61, 'of its menu')
+    truthy(printed('backed out of the last book menu (61)'), 'stop says what it did')
+    follower.on_packet_in({ id = 0x00B, data = '' })
+    follower.command({ '/tracker', 'mirror', 'stop' })
+    eq(#sent, reset_at + 1, 'after zoning there is no book to back out of')
+    truthy(printed('nothing to stop'), 'and stop says so')
+
+    -- Tracker hands its own events to the mirror.
+    local mirror_cfg = dailies.settings().mirror
+    eq(type(mirror_cfg), 'table', 'the settings carry a mirror table')
+    eq(mirror_cfg.enabled, false, 'Tracker ships with the mirror off')
+    eq(command({ '/tracker', 'mirror', 'follower' }).blocked, true, '/tracker mirror is handled')
+    eq(mirror_cfg.role, 'follower', '/tracker mirror follower sets the role')
+    command({ '/at', 'mirror', 'leader' })
+    eq(mirror_cfg.role, 'leader', '/at mirror works too')
+    command({ '/tracker', 'mirror', 'strict', 'off' })
+    eq(mirror_cfg.strict, false, 'strict can be turned off')
+    command({ '/tracker', 'mirror', 'strict', 'on' })
+    eq(mirror_cfg.strict, true, 'and back on')
+    command({ '/tracker', 'mirror', 'only', 'Seekey' })
+    eq(mirror_cfg.only, 'Seekey', 'only names the leader to follow')
+    command({ '/tracker', 'mirror', 'only', 'any' })
+    eq(mirror_cfg.only, '', 'any clears the name')
+
+    package.loaded['lib.mirror'] = nil
+    package.loaded['lib.mirror_transport'] = nil
+    os.execute('rmdir /s /q "' .. temp .. '" >nul 2>&1')
+    world.install = old_install
+    world.zone = 34
+    local _ = leader_cfg
+end
+mirror_checks()
 
 AshitaCore.GetMemoryManager = old_memory
 AshitaCore.GetResourceManager = old_resources

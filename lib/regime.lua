@@ -37,6 +37,12 @@ local state = {
     pending = {},
 }
 local debug_on = false
+-- Pages read since load. The mirror compares it before and after a visit to
+-- tell whether this visit showed a page.
+local parses = 0
+-- Until this os.clock(), the server's "registered" line is not taken. A
+-- mirror follower sets it while it takes the leader's targets.
+local hold_until = 0
 
 local function printf(fmt, ...)
     print(chat.header(addon.name) .. chat.message(fmt:format(...)))
@@ -70,6 +76,7 @@ end
 
 -- A new tome page replaces whatever regime was saved, then parsing begins.
 local function start_parsing()
+    parses = parses + 1
     wipe()
     state.is_active = true
     state.is_parsing = true
@@ -131,14 +138,60 @@ local function prune(now)
     end
 end
 
+-- The server's own "registered" line. A mirror follower holds it, since the
+-- leader's targets print their own confirmation and this one would print the
+-- page that was there before.
+local function confirm_from_text()
+    if os.clock() < hold_until then
+        return
+    end
+    confirm()
+end
+
 local HANDLERS = {
     { pattern = MESSAGES.START_PROMPT, needs_active = false, fn = function()
         state.is_active = true
     end },
     { pattern = MESSAGES.TRAINING_START, needs_active = true, fn = start_parsing },
-    { pattern = MESSAGES.REGIME_CONFIRMED, needs_active = true, fn = confirm },
+    { pattern = MESSAGES.REGIME_CONFIRMED, needs_active = true, fn = confirm_from_text },
     { pattern = MESSAGES.REGIME_CANCELED, needs_active = true, fn = wipe },
 }
+
+function regime.parses()
+    return parses
+end
+
+--- Ignore the server's "registered" line for the next `seconds`.
+function regime.hold_confirm(seconds)
+    hold_until = os.clock() + (tonumber(seconds) or 0)
+end
+
+--- Take a page another box picked. A mirror follower never sees the page
+--- text, so the leader's targets come with the pick. False when there are none.
+function regime.adopt(page)
+    if type(page) ~= 'table' or type(page.enemies) ~= 'table' or #page.enemies == 0 then
+        return false
+    end
+    wipe()
+    state.is_active = true
+    for _, enemy in ipairs(page.enemies) do
+        state.enemies[#state.enemies + 1] = {
+            total = tonumber(enemy.total) or 0,
+            killed = 0,
+            name = enemy.name,
+            match_type = enemy.match_type,
+        }
+    end
+    state.target_level_range = page.level
+    state.training_area_zone = page.zone
+    confirm()
+    return true
+end
+
+--- True for the line a book prints when it is opened.
+function regime.is_tome_prompt(raw)
+    return type(raw) == 'string' and string.find(raw, MESSAGES.START_PROMPT) ~= nil
+end
 
 function regime.set_on_confirm(fn)
     on_confirm = fn
