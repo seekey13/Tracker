@@ -55,12 +55,16 @@ function transport.last_error()
     return last_error
 end
 
+-- A record of 40 answers with its targets is under 3 KB. A file past this
+-- is not one, and reads short, so it has no #END and is dropped.
+local MAX_READ = 8192
+
 local function read_record()
     local handle = io.open(transport.path(), 'rb')
     if handle == nil then
         return nil
     end
-    local body = handle:read('*a')
+    local body = handle:read(MAX_READ)
     handle:close()
     if body == nil then
         return nil

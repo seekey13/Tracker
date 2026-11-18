@@ -76,6 +76,7 @@ local STATUS_EVENT = 4
 local BOOKS = { ['Field Manual'] = true, ['Grounds Tome'] = true }
 local BOOK_RANGE = 36 -- GetDistance is squared yalms; 6 yalms
 local TICK = 0.05
+local POLL_EVERY = 0.25 -- seconds between reads of the channel file
 local MENU_TIMEOUT = 5 -- for the book to open on a follower
 local FIRST_DELAY = 0.15 -- between the menu arriving and the first answer
 local STEP_DELAY = 0.3 -- between one answer and the next
@@ -84,10 +85,12 @@ local CAPTURE_TIMEOUT = 120
 local MAX_STEPS = 40
 local MAX_TARGETS = 8
 local MAX_AGE = 20 -- seconds a follower trusts a record
+local CLOCK_SKEW = 5 -- seconds a record may be dated ahead of this clock
 
 local cfg = nil
 local dump = false
 local next_tick = 0
+local next_poll = 0
 local sequence = 0
 
 -- What the leader is recording, or nil.
@@ -311,6 +314,20 @@ local function encode(record)
     return table.concat(parts, '|')
 end
 
+-- A whole number written in digits, or nil. tonumber alone takes 'nan',
+-- 'inf', and hex.
+local function whole(text)
+    if type(text) ~= 'string' or not text:match('^%d+$') then
+        return nil
+    end
+    return tonumber(text)
+end
+
+-- True when an answer is a page view, which leaves the menu open.
+local function is_update(raw)
+    return raw:byte(CHOICE_UPDATE + 1) ~= 0
+end
+
 local function decode(payload)
     local parts = {}
     for part in (payload .. '|'):gmatch('(.-)|') do
@@ -320,15 +337,15 @@ local function decode(payload)
         return nil, 'too few fields'
     end
     local record = {
-        seq = tonumber(parts[1]),
-        time = tonumber(parts[2]),
+        seq = whole(parts[1]),
+        time = whole(parts[2]),
         leader = parts[3],
-        zone = tonumber(parts[4]),
-        level = tonumber(parts[5]),
-        self_id = tonumber(parts[6]),
+        zone = whole(parts[4]),
+        level = whole(parts[5]),
+        self_id = whole(parts[6]),
         book = parts[7],
         confirmed = parts[8] == '1',
-        params = parts[9] ~= '' and from_hex(parts[9]) or '',
+        params = '',
         page = decode_page(parts[10]),
         trigger = from_hex(parts[11]),
         steps = {},
@@ -339,24 +356,31 @@ local function decode(payload)
     if not BOOKS[record.book] then
         return nil, 'not a book'
     end
-    if record.params == nil or (record.params ~= '' and #record.params ~= PARAMS_COMPARED) then
-        return nil, 'bad menu parameters'
+    if parts[9] ~= '' then
+        record.params = from_hex(parts[9])
+        if record.params == nil or #record.params ~= PARAMS_COMPARED then
+            return nil, 'bad menu parameters'
+        end
     end
     if record.page == false then
         return nil, 'bad targets'
     end
-    if record.trigger == nil or #record.trigger < ACTION_SIZE then
+    -- Only the client's own shapes are sent: a 28-byte talk and 20-byte answers.
+    if record.trigger == nil or #record.trigger ~= ACTION_SIZE or rd16(record.trigger, ACTION_CATEGORY) ~= TALK then
         return nil, 'bad talk packet'
     end
     for i = 12, #parts do
         local raw = from_hex(parts[i])
-        if raw == nil or #raw < CHOICE_SIZE then
+        if raw == nil or #raw ~= CHOICE_SIZE then
             return nil, 'bad answer packet'
         end
         record.steps[#record.steps + 1] = raw
     end
     if #record.steps > MAX_STEPS then
         return nil, 'too many answers'
+    end
+    if is_update(record.steps[#record.steps]) then
+        return nil, 'the last answer leaves the menu open'
     end
     return record
 end
@@ -393,6 +417,11 @@ local function finish_capture()
         if dump then
             printf('backed out of the %s. Nothing to mirror.', done.book)
         end
+        return
+    end
+    -- A follower sent this would be left in an open event it cannot see.
+    if is_update(done.steps[#done.steps]) then
+        printf('the %s closed on a page view, not a pick, so nothing was mirrored.', done.book)
         return
     end
     if cfg.strict and not done.confirmed then
@@ -438,12 +467,14 @@ local function back_out_packet()
 end
 
 -- Stop a replay. The client never saw the book, so an event still open on
--- the server is backed out of whatever the client's status reads.
+-- the server is backed out of whatever the client's status reads. In the
+-- final wait the pick went out but the event may not have closed, and a
+-- back-out of a closed event does nothing.
 local function abort(fmt, ...)
     if replay == nil then
         return
     end
-    local open = replay.open
+    local open = replay.open or replay.state == 'finish'
     printf('stopped at answer %d of %d: ' .. fmt, replay.index, #replay.steps, ...)
     replay = nil
     if open and menu.npc_id ~= 0 then
@@ -462,6 +493,10 @@ local function start_replay(record)
     local age = os.time() - record.time
     if age > MAX_AGE then
         printf('ignored a pick from %s made %d seconds ago.', record.leader, age)
+        return
+    end
+    if age < -CLOCK_SKEW then
+        printf('ignored a pick from %s dated ahead of the clock.', record.leader)
         return
     end
     if replay ~= nil then
@@ -574,7 +609,7 @@ local function step_replay(now)
         local raw = replay.steps[replay.index]
         send(OUT_CHOICE, own_choice(raw))
         -- An update leaves the event open. Anything else ends it.
-        replay.open = raw:byte(CHOICE_UPDATE + 1) ~= 0
+        replay.open = is_update(raw)
         if replay.index < #replay.steps then
             replay.index = replay.index + 1
             replay.at = now + STEP_DELAY
@@ -588,10 +623,16 @@ local function step_replay(now)
             abort('another menu opened after the last answer %s gave.', replay.leader)
         elseif status() == STATUS_IDLE then
             local page = replay.record.page
-            printf('followed %s.', replay.leader)
+            local was_page = is_page_pick(replay.steps[#replay.steps])
+            local leader = replay.leader
+            printf('followed %s.', leader)
             replay = nil
             if page ~= nil then
                 regime.adopt(page)
+            elseif was_page and regime.view().is_active then
+                -- The server now holds a page this client cannot name.
+                regime.clear()
+                printf('%s\'s targets did not come with the pick, so the AMAN section is cleared.', leader)
             end
         elseif now > replay.deadline then
             abort('the menu never closed.')
@@ -620,6 +661,11 @@ function mirror.bind(saved)
     transport.prime()
 end
 
+--- Tracker is unloading. A follower partway through is backed out.
+function mirror.unload()
+    abort('Tracker unloaded.')
+end
+
 --- The book's "placed here by the A.M.A.N." line was printed. Only the
 --- leader sees it: a follower's book never opens on its screen.
 function mirror.on_tome_text()
@@ -646,7 +692,7 @@ function mirror.on_packet_out(e)
     end
     if e.id == OUT_ACTION then
         -- Only a talk is recorded. A trade or an attack is never mirrored.
-        if #packet < ACTION_SIZE or rd16(packet, ACTION_CATEGORY) ~= TALK then
+        if #packet ~= ACTION_SIZE or rd16(packet, ACTION_CATEGORY) ~= TALK then
             return
         end
         capture = nil
@@ -673,7 +719,19 @@ function mirror.on_packet_out(e)
         if dump then
             printf('talk to the %s (id %d, index %d) %s', name, capture.target, index, to_hex(packet))
         end
-    elseif capture ~= nil and #packet >= CHOICE_SIZE then
+    elseif capture ~= nil then
+        -- An answer of another shape, or to anyone but the book or this
+        -- character, belongs to some other menu. A trade does not end the
+        -- recording, so its npc's menu would otherwise be sent as the book's.
+        local me = self_info()
+        local target = rd32(packet, CHOICE_TARGET)
+        if #packet ~= CHOICE_SIZE or (target ~= capture.target and (me == nil or target ~= me.id)) then
+            if dump then
+                printf('an answer went to something other than the %s. Nothing will be mirrored.', capture.book)
+            end
+            capture = nil
+            return
+        end
         if #capture.steps >= MAX_STEPS then
             printf('more than %d answers in one visit. Nothing will be mirrored.', MAX_STEPS)
             capture = nil
@@ -757,7 +815,11 @@ function mirror.tick()
     if not is_follower() then
         return
     end
-    local payload = transport.poll()
+    local payload = nil
+    if now >= next_poll then
+        next_poll = now + POLL_EVERY
+        payload = transport.poll()
+    end
     if payload ~= nil then
         local record, why = decode(payload)
         if record ~= nil then
@@ -821,13 +883,13 @@ function mirror.set_mode(mode)
     if mode == mirror.mode() then
         return true
     end
+    abort('the mirror setting changed.')
     cfg.enabled = mode ~= 'off'
     if cfg.enabled then
         cfg.role = mode
         transport.prime()
     end
     capture = nil
-    replay = nil
     settingslib.save()
     return true
 end
@@ -842,18 +904,18 @@ function mirror.command(args)
     if sub == '' or sub == 'status' then
         report()
     elseif sub == 'on' or sub == 'off' then
+        abort('the mirror setting changed.')
         cfg.enabled = sub == 'on'
         capture = nil
-        replay = nil
         if cfg.enabled then
             transport.prime()
         end
         settingslib.save()
         printf('%s (%s).', cfg.enabled and 'on' or 'off', cfg.role)
     elseif sub == 'leader' or sub == 'follower' then
+        abort('the mirror setting changed.')
         cfg.role = sub
         capture = nil
-        replay = nil
         transport.prime()
         settingslib.save()
         if sub == 'leader' then

@@ -40,7 +40,7 @@ The Aether Traveler in Port Jeuno wants three of one item each week. Hear his we
 
 Pick an AMAN page on one character and every other box on the same PC picks it too. It is off until turned on, for each character.
 
-Set it from the cog, or by command. On the character you drive:
+Set it from the cog while the window is showing, or by command. On the character you drive:
 
 ```
 /tracker mirror leader
@@ -70,7 +70,7 @@ Only a talk to a Field Manual or Grounds Tome is recorded. Trades, shops, and ot
 
 With strict on, the leader sends a pick only when the book printed its "placed here by the A.M.A.N." line, and a follower answers only when its book opens the same menu the leader's did. A follower with a hunt in progress gets a cancel prompt where the page list should be. That prompt opens differently, so the follower backs out of it. Strict off drops both checks.
 
-A follower does nothing, and says why, when it is in another zone, has no book within 6 yalms, is already in a menu, or the pick is more than 20 seconds old. When its menu is not the one the leader answered, it backs out and picks nothing.
+A follower does nothing, and says why, when it is in another zone, has no book within 6 yalms, is already in a menu, or the pick is more than 20 seconds old. A pick it skips is not tried again; pick again on the leader. When its menu is not the one the leader answered, it backs out and picks nothing.
 
 Levels may differ. Page N is the same page for every level in a zone. A follower outside the page's level range registers it and earns no credit, and says so.
 

@@ -2834,12 +2834,154 @@ local function mirror_checks()
     eq(#sent, before + 2, 'a record written before the follower started is ignored')
 
     -- A half-written file is skipped until it is whole.
+    -- The channel is read 4 times a second.
     write_file(channel, 'TRACKER-MIRROR-2|1|2|Leader|245')
-    tick(late)
+    tick(late, 0.3)
     eq(#sent, before + 2, 'a record with no sentinel is not read')
     write_file(channel, 'TRACKER-MIRROR-2|junk\n#END\n')
-    tick(late)
+    tick(late, 0.3)
     truthy(printed('ignored a record it could not read'), 'a record that does not parse is reported')
+
+    -- A record is read strictly: only the client's own packet shapes go out.
+    lead_pick()
+    local good = (channel_text() or ''):match('^TRACKER%-MIRROR%-2|(.-)\n')
+    local function fields()
+        local out = {}
+        for part in (good .. '|'):gmatch('(.-)|') do
+            out[#out + 1] = part
+        end
+        return out
+    end
+    local function offer_record(parts, why)
+        write_file(channel, 'TRACKER-MIRROR-2|' .. table.concat(parts, '|') .. '\n#END\n')
+        who = alt
+        local n = #sent
+        tick(late, 0.3)
+        tick(late, 1)
+        eq(#sent, n, why .. ': nothing is sent')
+    end
+    local bad = fields()
+    bad[1] = bad[1] .. '0'
+    bad[2] = 'nan'
+    offer_record(bad, 'a time of nan')
+    truthy(printed('(a number is missing)'), 'a time of nan is refused')
+    bad = fields()
+    bad[1] = bad[1] .. '1'
+    bad[9] = 'ZZ'
+    offer_record(bad, 'menu parameters that are not hex')
+    truthy(printed('(bad menu parameters)'), 'menu parameters that are not hex are refused')
+    bad = fields()
+    bad[1] = bad[1] .. '2'
+    bad[11] = bad[11]:sub(1, 20) .. '0200' .. bad[11]:sub(25)
+    offer_record(bad, 'a talk that is not a talk')
+    truthy(printed('(bad talk packet)'), 'a 0x01A that is not a talk is refused')
+    bad = fields()
+    bad[1] = bad[1] .. '3'
+    bad[12] = bad[12] .. '0000'
+    offer_record(bad, 'an answer of 22 bytes')
+    truthy(printed('(bad answer packet)'), 'an answer longer than the client sends is refused')
+    bad = fields()
+    bad[1] = bad[1] .. '4'
+    bad[#bad] = bad[#bad]:sub(1, 28) .. '01' .. bad[#bad]:sub(31)
+    offer_record(bad, 'a last answer that is a page view')
+    truthy(printed('(the last answer leaves the menu open)'), 'a record ending on a page view is refused')
+    bad = fields()
+    bad[1] = bad[1] .. '5'
+    bad[2] = tostring(os.time() + 60)
+    offer_record(bad, 'a time ahead of the clock')
+    truthy(printed('dated ahead of the clock'), 'a record dated ahead of the clock is refused')
+
+    -- The leader sends nothing when its visit closed on a page view.
+    local kept = channel_text()
+    who = lead
+    out(leader, 0x01A, talk(500))
+    menu_in(leader, 500, 61, LEADER_PARAMS)
+    leader.on_tome_text()
+    ents[10].status = 4
+    tick(leader)
+    out(leader, 0x05B, choice(0x12, true))
+    ents[10].status = 0
+    tick(leader)
+    eq(channel_text(), kept, 'a visit that closed on a page view is not sent')
+    truthy(printed('closed on a page view, not a pick'), 'the leader says why')
+
+    -- An answer to another npc while the book's recording is open drops it.
+    out(leader, 0x01A, talk(500))
+    menu_in(leader, 500, 61, LEADER_PARAMS)
+    leader.on_tome_text()
+    ents[10].status = 4
+    tick(leader)
+    out(leader, 0x05B, '\91\10\1\2' .. le32(17000700) .. le32(0x12) .. le16(700) .. '\0\0' .. le16(245) .. le16(61))
+    out(leader, 0x05B, choice(0x80000012, false))
+    ents[10].status = 0
+    tick(leader)
+    eq(channel_text(), kept, 'an answer to another npc is never sent as the book\'s')
+
+    -- A follow stopped any other way still backs out of the book.
+    local function follow_to_first_answer()
+        lead_pick()
+        who = alt
+        tick(follower, 1)
+        tick(follower, 1)
+        menu_in(follower, 600, 61)
+        tick(follower)
+        tick(follower, 0.2)
+    end
+    local mid = #sent
+    follow_to_first_answer()
+    eq(#sent, mid + 2, 'the talk and the page view went out')
+    follower.set_mode('off')
+    eq(#sent, mid + 3, 'turning the mirror off partway sends one more packet')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out')
+    truthy(printed('the mirror setting changed'), 'the follower says why it stopped')
+    follower.set_mode('follower')
+
+    mid = #sent
+    follow_to_first_answer()
+    follower.command({ '/tracker', 'mirror', 'leader' })
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'changing the role partway backs out')
+    eq(#sent, mid + 3, 'with one packet')
+    follower.command({ '/tracker', 'mirror', 'follower' })
+
+    mid = #sent
+    follow_to_first_answer()
+    follower.unload()
+    eq(#sent, mid + 3, 'unloading partway sends one more packet')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out')
+
+    -- In the final wait, a stop or a timeout backs out too.
+    mid = #sent
+    follow_to_first_answer()
+    ents[20].status = 4
+    tick(follower, 0.3)
+    eq(read_u32(sent[#sent].data, 9), 0x80000012, 'the pick went out')
+    follower.command({ '/tracker', 'mirror', 'stop' })
+    eq(#sent, mid + 4, 'a stop in the final wait sends one more packet')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out')
+    ents[20].status = 0
+    mid = #sent
+    follow_to_first_answer()
+    ents[20].status = 4
+    tick(follower, 0.3)
+    tick(follower, 9)
+    truthy(printed('the menu never closed'), 'the final wait times out')
+    eq(#sent, mid + 4, 'and the timeout sends one more packet')
+    eq(read_u32(sent[#sent].data, 9), 0x40000000, 'which backs out')
+    ents[20].status = 0
+
+    -- A page pick that came without targets clears the old ones.
+    eq(regime.view().is_active, true, 'the follower still has its old regime')
+    lead_pick({ page_text = false })
+    who = alt
+    tick(follower, 1)
+    tick(follower, 1)
+    menu_in(follower, 600, 61)
+    tick(follower)
+    tick(follower, 0.2)
+    tick(follower, 0.3)
+    tick(follower)
+    eq(regime.view().is_active, false, 'a page pick without targets clears the old regime')
+    truthy(printed('targets did not come with the pick'), 'the follower says so')
 
     -- Tracker hands its own events to the mirror.
     local mirror_cfg = dailies.settings().mirror
